@@ -1,0 +1,15 @@
+{% extends 'base.html' %}{% block content %}
+<p class="muted">Измените ссылку или контакт здесь — бот автоматически подставит новое значение во все связанные ответы. Открывать и заново публиковать каждую карточку не нужно.</p>
+<p class="small muted">Новый контакт достаточно один раз связать с нужными карточками через список в редакторе ответа. Уже отправленные сообщения сохраняются как история переписки.</p>
+{% for r in resources %}<section class="panel" id="resource-{{r.key}}"><form class="resource-row" method="post">
+<input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="key" value="{{r.key}}">
+<label>Название<input name="label" value="{{r.label or r.value}}" required maxlength="250"></label>
+<label>Ссылка или контакт<input name="value" value="{{r.value}}" required maxlength="2000"></label><button>Сохранить</button>
+</form>
+{% if usage[r.key] %}<details class="resource-usage"><summary>Связанные карточки: {{usage[r.key]|length}}</summary><ul>{% for c in usage[r.key] %}<li><a href="/cards/{{c.id}}">{{c.title}}</a> <span class="muted small">· {{c.status|label}}</span></li>{% endfor %}</ul></details>
+{% else %}<p class="small muted resource-unused">Пока не связан с ответами. Добавьте его из списка в нужной карточке и сохраните её.</p>{% endif %}
+</section>{% endfor %}
+<section class="panel"><h3>Добавить ссылку или контакт</h3><form class="resource-row" method="post"><input type="hidden" name="csrf" value="{{csrf}}">
+<label>Название<input name="label" placeholder="Например, справочная аэропорта" required maxlength="250"></label>
+<label>Ссылка или контакт<input name="value" required maxlength="2000"></label><button class="primary">Добавить</button>
+</form></section>{% endblock %}

@@ -1,0 +1,33 @@
+{% extends 'base.html' %}{% block content %}
+<div class="lead"><a href="{{url_for('queue',state='all')}}">← Все диалоги</a><a class="button" href="https://vk.com/gim{{group_id}}?sel={{conversation.peer_id}}" target="_blank" rel="noopener noreferrer">Полная переписка в VK ↗</a></div>
+<p class="small muted">{{conversation.user_name or 'Пользователь VK'}} · VK ID: {{conversation.user_id}} · <a href="https://vk.com/id{{conversation.user_id}}" target="_blank" rel="noopener noreferrer">Профиль пользователя ↗</a></p>
+<div class="editor-grid"><section class="panel"><h2>Переписка</h2>
+<p class="small muted">Последние 30 сообщений. Ответы из админки отправляются от имени сообщества. Ответы сотрудников из VK появляются здесь автоматически.</p>
+<details><summary>Согласие и история</summary><p class="small muted">Согласие: {{conversation.consent_state|label}}. Переписка с сотрудником доступна и при отказе от ИИ. Ответы сотрудников сохраняются для общей истории и не передаются ИИ. Здесь последние сообщения; полная переписка доступна в VK.</p></details>
+<div class="history-navigation"><span class="small muted">Новые сообщения внизу</span><button type="button" id="latest-messages" hidden>К последним сообщениям ↓</button></div>
+<div id="dialogue-history" role="region" aria-label="История переписки" tabindex="0" data-revision="{{revision}}" data-updates="{{url_for('dialogue_updates',peer_id=conversation.peer_id)}}">{% include '_messages.html' %}</div>
+<p id="dialogue-changed" class="notice" hidden>Переписка обновилась. Проверьте новые сообщения перед отправкой. Введённый текст сохранён.</p>
+<form method="post" id="reply-form" class="reply-form">
+<input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="reply"><input type="hidden" name="client_key" value="{{form_key}}"><input type="hidden" name="revision" value="{{revision}}">
+<label>Ваше имя <span class="muted">· видно только сотрудникам</span><input name="staff_name" value="{{session.staff_name or 'Сотрудник'}}" required maxlength="80"></label>
+<label>Ответ пассажиру<textarea name="reply" rows="4" required maxlength="3500" placeholder="Введите ответ…">{{draft}}</textarea></label>
+<p class="small muted">При отправке управление переходит сотруднику.</p><button class="primary">Отправить от имени сообщества</button>
+</form></section>
+<aside>{% for t in tickets %}<section class="panel"><h3>Управление диалогом</h3>
+<p><span class="badge" {{'data-active-status' if t.status in ('open','waiting_user') else ''}}>{{t.status|label}}</span></p><p class="small muted">{{t.reason|label}} · {{t.created_at|date}}</p>
+{% if t.status=='closed' and t.closure_reason %}<p class="small">{{t.closure_reason|label}}. Это не подтверждение решения вопроса пассажиром.</p>{% endif %}
+<p><strong>{{t.topic|topic_label or 'Тема не указана'}}</strong>{% if t.topic and t.topic_source=='auto' and t.topic_request_id<t.request_id %}<small>По предыдущим сообщениям</small>{% endif %}</p>
+<details><summary>{{'Изменить тему' if t.topic else 'Указать тему'}}</summary><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="topic"><input type="hidden" name="ticket_id" value="{{t.id}}"><input type="hidden" name="topic_version" value="{{t.topic_version}}"><label>Тема диалога<input name="topic" value="{{t.topic|topic_label}}" list="ticket-topics" required maxlength="250" placeholder="Выберите или введите тему"></label><button>Сохранить тему</button></form></details>
+{% if t.last_staff_reply_at %}<p class="small muted">Последний ответ сотрудника: {{t.last_staff_reply_at|date}}</p>{% endif %}
+{% if t.status in ('open','waiting_user') %}{% if not t.assigned_to %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="take"><label>Ваше имя<input name="staff_name" value="{{session.staff_name}}" required></label><button>Взять в работу</button></form>{% else %}<p>В работе: <strong>{{t.assigned_to}}</strong></p>{% endif %}
+<section class="ticket-auto-close" aria-labelledby="auto-close-title-{{t.id}}">
+<h4 id="auto-close-title-{{t.id}}">Возврат боту по неактивности</h4>
+{% if t.auto_close_paused %}<p class="small muted">Отключен для этого диалога. Управление останется у сотрудника до ручного возврата боту.</p>{% elif settings.waiting_user_timeout_hours|int==0 %}<p class="small muted">Отключен в настройках. Управление останется у сотрудника до ручного возврата боту.</p>{% elif t.status=='waiting_user' %}<p class="small muted">Через {{settings.waiting_user_timeout_hours}} ч после последнего ответа сотрудника, если пассажир не ответит.</p>{% else %}<p class="small muted">Отсчёт начнётся после ответа сотрудника. Срок ожидания пассажира: {{settings.waiting_user_timeout_hours}} ч.</p>{% endif %}
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="auto_close"><input type="hidden" name="ticket_id" value="{{t.id}}"><input type="hidden" name="paused" value="{{'0' if t.auto_close_paused else '1'}}"><button>{{'Включить возврат по неактивности' if t.auto_close_paused else 'Оставить у сотрудника без срока'}}</button></form>
+</section>
+<form method="post" class="ticket-note"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="note"><label>Внутренняя заметка<textarea name="note" rows="4">{{t.note}}</textarea></label><button>Сохранить заметку</button></form>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="resume"><button class="primary full">Вернуть боту</button></form>{% else %}<p>{{t.note}}</p>{% endif %}</section>{% else %}<section class="panel"><h3>Управление диалогом</h3><p><span class="badge" data-active-status>У бота</span></p><p class="muted">Бот ответит на следующее сообщение пользователя. Вы можете подключиться, отправив ответ из админки или VK.</p></section>{% endfor %}
+</aside></div>
+<script src="{{url_for('static',filename='dialogue.js')}}" defer></script>
+<datalist id="ticket-topics">{% for topic in topics %}<option value="{{topic}}">{% endfor %}</datalist>
+{% endblock %}

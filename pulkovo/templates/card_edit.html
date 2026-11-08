@@ -1,0 +1,38 @@
+{% extends 'base.html' %}{% block content %}
+<a class="back" href="/cards">← К базе знаний</a>
+<div class="editor-grid"><section class="panel">
+{% if card.visibility=='internal' %}<p class="notice">Служебная запись из Excel. Бот её не использует.</p>{% else %}<p><span class="badge {{ 'success' if card.status=='published' else '' }}">{{card.status|label}}</span></p>{% endif %}
+<form method="post" id="answer-form">
+<input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="version" value="{{card.version}}"><input type="hidden" name="resource_snapshot" value="{{resource_snapshot}}">
+<label>Вопрос<input name="title" value="{{card.title}}" required maxlength="600"></label>
+<label>Тема<input name="topic" value="{{card.topic|topic_label}}" list="card-topics" required maxlength="250" placeholder="Например, багаж и ручная кладь"></label>
+<datalist id="card-topics">{% for topic in topics %}<option value="{{topic}}">{% endfor %}</datalist>
+<label id="answer-label" for="answer-text">Ответ</label>
+<textarea id="answer-text" name="answer" rows="9">{{editor_answer}}</textarea>
+{% if card.visibility=='public' %}
+<div id="answer-editor" class="answer-editor" contenteditable="true" role="textbox" aria-labelledby="answer-label" aria-multiline="true" hidden>{% for part in editor_parts %}{% if part.resource %}{% set r=part.resource %}<span class="answer-field" contenteditable="false" data-resource-key="{{r.key}}" tabindex="0" title="{{r.label or r.value}}" aria-label="{{r.label or r.value}}: {{r.value}}">{{r.value}}</span>{% else %}{{part.text}}{% endif %}{% endfor %}</div>
+<p class="small muted answer-hint" id="answer-hint" hidden>Наведите на ссылку или контакт, чтобы увидеть название. Изменения в <a href="{{url_for('resources')}}" target="_blank" rel="noopener">справочнике</a> автоматически обновляют связанные ответы.</p>
+<details class="resource-picker"><summary>Вставить ссылку или контакт</summary>
+{% if resources %}<label>Ссылка или контакт<select id="resource-choice"><option value="">Выберите из списка</option>{% for r in resources %}<option value="{{r.key}}" data-value="{{r.value}}" data-label="{{r.label or r.value}}">{{r.label or r.value}}</option>{% endfor %}</select></label>
+<p id="resource-preview" class="small muted" aria-live="polite"></p><button type="button" id="insert-resource" disabled>Вставить</button>
+{% else %}<p class="small muted">Сохранённых ссылок и контактов пока нет.</p>{% endif %}
+<p class="small muted"><a href="/resources" target="_blank" rel="noopener">Добавить или изменить в справочнике ↗</a></p>
+</details>
+{% endif %}
+<details class="editor-options"><summary>Дополнительно — когда и как использовать ответ</summary>
+<label>Другие формулировки вопроса <span class="muted">· необязательно</span><textarea name="variants" rows="3">{{card.question_variants|jsonlist|join('
+')}}</textarea><small>Помогают распознать тот же вопрос другими словами. Каждая формулировка — с новой строки.</small></label>
+<label>Когда подходит этот ответ <span class="muted">· необязательно</span><textarea name="conditions" rows="3">{{card.conditions}}</textarea><small>Например: «Только для парковки P1». Помогает ИИ выбрать подходящий ответ.</small></label>
+<label>Когда использовать<select name="mode">{% for opt in ['any','normal','cover'] %}<option value="{{opt}}" {{'selected' if card.mode==opt else ''}}>{{opt|label}}</option>{% endfor %}</select></label>
+<label>После выбора ответа<select name="action"><option value="answer" {{'selected' if card.action=='answer' else ''}}>Отправить ответ</option><option value="handoff" {{'selected' if card.action=='handoff' else ''}}>Передать обращение сотруднику</option></select></label>
+</details>
+<p class="small muted">Публикуйте ответ, когда проверили текст и его актуальность. Черновики бот не использует.</p>
+<div class="actions">
+<button name="intent" value="draft">{{'Снять с публикации' if card.status=='published' else 'Сохранить черновик'}}</button>
+{% if card.visibility=='public' %}<button class="primary" name="intent" value="publish">{{'Сохранить и опубликовать' if card.status=='published' else 'Опубликовать'}}</button>{% endif %}
+</div></form></section>
+<aside>
+<section class="panel"><h3>Источник</h3><p class="small">{{card.source or 'Создана вручную'}}</p>{% for issue in card.issues|jsonlist %}<p class="issue">{{issue}}</p>{% endfor %}</section>
+<section class="panel"><h3>История изменений</h3>{% for v in versions %}<details><summary>Версия {{v.version}} · {{v.created_at|date}}</summary><p class="small">{{v.card.title}}</p><blockquote class="version-answer">{{v.answer}}</blockquote><form method="post" action="/cards/{{card.id}}/restore/{{v.version}}"><input type="hidden" name="csrf" value="{{csrf}}"><button>Восстановить в черновик</button></form></details>{% else %}<p class="muted">Появится после сохранения.</p>{% endfor %}</section></aside></div>
+<script src="{{url_for('static',filename='editor.js')}}" defer></script>
+{% endblock %}

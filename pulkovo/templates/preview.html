@@ -1,0 +1,14 @@
+{% extends 'base.html' %}{% block content %}
+<section class="panel"><h2>Какой ответ получит пассажир?</h2><p class="muted">Введите вымышленный вопрос. Проверка использует те же опубликованные ответы, что и бот, и не отправляет сообщений в VK.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="ai">
+<label>Тестовый вопрос<textarea name="text" rows="4" required maxlength="4000" placeholder="Например: где можно оплатить парковку?">{{text}}</textarea></label>
+<label class="checkbox"><input type="checkbox" name="synthetic" required> В вопросе нет персональных данных</label>
+<button class="primary">Проверить ответ</button></form></section>
+{% if decision %}<section class="panel"><h2>{{decision.action|label}}</h2>
+{% if decision.action=='answer' and answer_card %}<blockquote>{{answer_card.rendered_answer}}</blockquote><a href="/cards/{{answer_card.id}}">Открыть карточку: {{answer_card.title}} →</a>
+{% elif decision.action=='clarify' %}<blockquote>{{decision.question}}</blockquote>
+{% elif decision.action=='acknowledge' %}<blockquote>Пожалуйста!</blockquote>
+{% else %}<p>Обращение появится в очереди сотрудника. Бот приостановит автоматические ответы в этом диалоге.</p>{% endif %}
+{% if decision.topic %}<p class="muted">Тема: {{decision.topic|topic_label}}</p>{% endif %}
+{% if decision.reason %}<p class="small muted">{{decision.reason}}</p>{% endif %}</section>{% endif %}
+{% endblock %}

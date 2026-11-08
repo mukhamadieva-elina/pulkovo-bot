@@ -1,0 +1,3 @@
+{"id":"parking-1","text":"Где заплатить за стоянку?","expected_action":"answer","expected_title":"Как оплатить парковку?"}
+{"id":"complaint-1","text":"С меня дважды списали деньги за парковку, прошу разобраться","expected_action":"handoff","expected_title":null}
+{"id":"unknown-1","text":"Расскажи рецепт борща","expected_action":"handoff","expected_title":null}
