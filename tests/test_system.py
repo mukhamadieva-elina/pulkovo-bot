@@ -21,6 +21,8 @@ from pulkovo.engine import Engine
 from pulkovo.importer import import_workbook, inspect_workbook, template_workbook
 from pulkovo.migrations import migrate
 from pulkovo.web import create_app
+from fastapi.testclient import TestClient
+from web_client import authenticated_client
 from pulkovo.vk_staff import StaffReplySync
 
 
@@ -212,9 +214,7 @@ class SystemTests(unittest.TestCase):
         self.assertEqual(self.ai.calls,0)
 
     def test_settings_accept_inline_consent_and_reject_invalid_url(self):
-        client=create_app(self.cfg,self.db).test_client()
-        with client.session_transaction() as session:
-            session.update(authenticated=True,csrf='test')
+        client=authenticated_client(self.cfg,self.db)
         form=self.db.settings() | {'csrf':'test','consent_url':'','consent_version':'v2','consent_ready':'on'}
         client.post('/settings',data=form)
         self.assertEqual(self.db.setting('consent_url'),'')
@@ -382,15 +382,15 @@ class SystemTests(unittest.TestCase):
         client,_,page,_=self.editor(first)
         self.assertIn('class="answer-field"',page)
         self.assertIn('data-resource-key="parking_url"',page)
-        resources=client.get('/resources').get_data(as_text=True)
+        resources=client.get('/resources').text
         self.assertIn('Связанные карточки: 2',resources)
         self.assertIn(f'/cards/{second}',resources)
         result=client.post('/resources',data={'csrf':'test','key':'parking_url','label':'Оплата парковки','value':'https://airport.example/new'})
-        self.assertEqual(result.status_code,302)
+        self.assertEqual(result.status_code,303)
         for card in self.db.cards():
             self.assertEqual((card['version'],card['status']),(1,'published'))
             self.assertIn('https://airport.example/new',self.db.render_answer(card))
-            page=client.get(f"/cards/{card['id']}").get_data(as_text=True)
+            page=client.get(f"/cards/{card['id']}").text
             self.assertIn('https://airport.example/new',page)
         new=self.message()
         transport=Transport();self.engine.deliver(transport)
@@ -409,18 +409,18 @@ class SystemTests(unittest.TestCase):
         self.assertNotIn(original,page)
         self.assertIn(f'name="topic" value="{short}"',page)
         for query in ({'topic':short},{'topic':original},{'q':short}):
-            page=client.get('/cards',query_string=query).get_data(as_text=True)
+            page=client.get('/cards',params=query).text
             self.assertIn('Старый раздел Excel',page)
             self.assertIn('Новая карточка',page)
             self.assertNotIn('Другая тема',page)
             self.assertNotIn(original,page)
         form.update(title='Старый раздел Excel',topic=short,answer='Обновлённая инструкция о багаже.',intent='publish')
-        self.assertEqual(client.post(path,data=form).status_code,302)
+        self.assertEqual(client.post(path,data=form).status_code,303)
         self.assertEqual(self.db.one('SELECT topic FROM cards WHERE id=?',(first,))['topic'],original)
         client,path,_,form=self.editor(first)
         form.update(title='Старый раздел Excel',topic='Моя тема / раздел',answer='Инструкция о багаже.',intent='publish')
-        self.assertEqual(client.post(path,data=form).status_code,302)
-        self.assertIn('Моя тема / раздел',client.get(path).get_data(as_text=True))
+        self.assertEqual(client.post(path,data=form).status_code,303)
+        self.assertIn('Моя тема / раздел',client.get(path).text)
         self.assertEqual(self.db.one('SELECT topic FROM cards WHERE id=?',(first,))['topic'],'Моя тема / раздел')
 
     def test_short_topics_are_consistent_in_queue_statistics_and_export(self):
@@ -433,23 +433,21 @@ class SystemTests(unittest.TestCase):
         self.db.handoff(second,'no_matching_answer')
         client,_,_,_=self.editor()
         for path in ('/','/queue','/dialogue/11','/statistics','/statistics.csv'):
-            page=client.get(path).get_data(as_text=True)
+            page=client.get(path).text
             self.assertIn(short,page,path)
             self.assertNotIn(original,page,path)
-        stats=client.get('/statistics').get_data(as_text=True)
+        stats=client.get('/statistics').text
         self.assertEqual(stats.count(f'<span>{short}</span>'),1)
         self.assertIn(f'<span>{short}</span><strong>2</strong>',stats)
         self.db.resume(11)
-        self.assertIn(short,client.get('/queue?state=all').get_data(as_text=True))
+        self.assertIn(short,client.get('/queue?state=all').text)
         self.assertEqual(self.db.one('SELECT topic FROM requests WHERE id=?',(first['id'],))['topic'],original)
 
     def test_resources_only_expose_bot_values_without_visibility_choice(self):
         self.db.execute("INSERT INTO resources(key,value,visibility) VALUES ('parking_url','https://airport.example/parking','public')")
         self.db.execute("INSERT INTO resources(key,value,visibility) VALUES ('old_internal','private value','internal')")
-        client=create_app(self.cfg,self.db).test_client()
-        with client.session_transaction() as session:
-            session.update(authenticated=True,csrf='test')
-        page=client.get('/resources').get_data(as_text=True)
+        client=authenticated_client(self.cfg,self.db)
+        page=client.get('/resources').text
         self.assertIn('https://airport.example/parking',page)
         self.assertNotIn('{parking_url}',page)
         self.assertNotIn('name="visibility"',page)
@@ -478,11 +476,9 @@ class SystemTests(unittest.TestCase):
         self.assertIn('https://intranet.example/team',internal['answer'])
 
     def editor(self, card_id=None):
-        client=create_app(self.cfg,self.db).test_client()
-        with client.session_transaction() as session:
-            session.update(authenticated=True,csrf='test')
+        client=authenticated_client(self.cfg,self.db)
         path=f'/cards/{card_id}' if card_id else '/cards/new'
-        page=client.get(path).get_data(as_text=True)
+        page=client.get(path).text
         hidden={name:html.unescape(value) for name,value in re.findall(r'type="hidden" name="([^"]+)" value="([^"]*)"',page)}
         return client,path,page,hidden
 
@@ -493,13 +489,13 @@ class SystemTests(unittest.TestCase):
             self.assertNotIn(f'name="{name}"',page)
         form.update(title='Оплата парковки',topic='Парковка',answer='Сайт: https://airport.example/pay. Телефон: +7 812 555-55-55.',intent='publish')
         result=client.post(path,data=form)
-        self.assertEqual(result.status_code,302)
+        self.assertEqual(result.status_code,303)
         card=self.db.cards()[0]
         self.assertEqual((card['status'],card['reviewed']),('published',1))
         self.assertIn('{phone}',card['answer'])
         self.assertNotIn('https://',card['answer'])
         self.assertEqual(self.db.render_answer(card),form['answer'])
-        page=client.get(result.location).get_data(as_text=True)
+        page=client.get(result.headers["location"]).text
         answer=html.unescape(re.search(r'<textarea id="answer-text"[^>]*>(.*?)</textarea>',page,re.S)[1])
         self.assertEqual(answer,form['answer'])
         self.assertNotIn('{phone}',page)
@@ -510,7 +506,7 @@ class SystemTests(unittest.TestCase):
         client,path,_,form=self.editor(ident)
         self.db.execute("UPDATE resources SET value='https://airport.example/new' WHERE key='parking'")
         form.update(title='Оплата',topic='Парковка',answer='Оплата: https://airport.example/old',intent='publish')
-        self.assertEqual(client.post(path,data=form).status_code,302)
+        self.assertEqual(client.post(path,data=form).status_code,303)
         card=self.db.cards()[0]
         self.assertEqual(card['answer'],'Оплата: {parking}')
         self.assertEqual(self.db.render_answer(card),'Оплата: https://airport.example/new')
@@ -520,11 +516,11 @@ class SystemTests(unittest.TestCase):
         client,path,page,form=self.editor(ident)
         self.assertNotIn('value="publish"',page)
         form.update(title='Контакт',topic='Службы',answer='Для сотрудников',intent='publish',visibility='public')
-        page=client.post(path,data=form).get_data(as_text=True)
+        page=client.post(path,data=form).text
         self.assertIn('Служебная запись не предназначена',page)
         self.assertEqual(self.db.cards()[0]['version'],1)
         form['intent']='draft'
-        self.assertEqual(client.post(path,data=form).status_code,302)
+        self.assertEqual(client.post(path,data=form).status_code,303)
         card=self.db.cards()[0]
         self.assertEqual((card['visibility'],card['status'],card['reviewed']),('internal','draft',0))
 
@@ -533,12 +529,12 @@ class SystemTests(unittest.TestCase):
         client,path,_,form=self.editor(ident)
         valid=dict(form)
         form.update(title='Оплата',topic='Парковка',answer='https://airport.example/new',intent='publish',resource_snapshot='tampered')
-        page=client.post(path,data=form).get_data(as_text=True)
+        page=client.post(path,data=form).text
         self.assertIn('Форма устарела',page)
         self.assertEqual(self.db.cards()[0]['version'],1)
         self.db.save_card(self.db.cards()[0]|dict(answer='Новое содержание'),ident,1)
         form['resource_snapshot']=valid['resource_snapshot']
-        page=client.post(path,data=form).get_data(as_text=True)
+        page=client.post(path,data=form).text
         self.assertIn('Карточка уже изменена',page)
         self.assertIn('name="version" value="1"',page)
         self.assertEqual(self.db.cards()[0]['answer'],'Новое содержание')
@@ -552,7 +548,7 @@ class SystemTests(unittest.TestCase):
         for key in ('arrivals','departures'):
             self.assertIn(f'data-resource-key="{key}"',page)
         form.update(title='Табло',topic='Рейсы',answer='Прилёт: {arrivals}\nВылет: {departures}',intent='publish')
-        self.assertEqual(client.post(path,data=form).status_code,302)
+        self.assertEqual(client.post(path,data=form).status_code,303)
         self.assertEqual(self.db.one('SELECT answer FROM cards WHERE id=?',(ident,))['answer'],form['answer'])
         client.post('/resources',data={'csrf':'test','key':'arrivals','label':'Прилёт','value':'https://airport.example/arrivals'})
         self.assertEqual(self.db.render_answer(self.db.one('SELECT * FROM cards WHERE id=?',(ident,))),'Прилёт: https://airport.example/arrivals\nВылет: https://airport.example/board')
@@ -567,7 +563,7 @@ class SystemTests(unittest.TestCase):
         self.assertNotIn('data-resource-key="private_info"',page)
         self.assertNotIn('Скрытый контакт',page)
         form.update(title='Контакт',topic='Услуги',answer='Контакт: {public_info}\n[имя]',intent='publish')
-        page=client.post(path,data=form).get_data(as_text=True)
+        page=client.post(path,data=form).text
         self.assertIn('В ответе остались незаполненные',page)
         self.assertIn('data-resource-key="public_info"',page)
         self.assertNotIn('<img src=x',page)
@@ -577,7 +573,7 @@ class SystemTests(unittest.TestCase):
         ident=self.card()
         client,path,_,form=self.editor(ident)
         form.update(title='Вопрос',topic='Тема',answer='Черновик',intent='draft')
-        self.assertEqual(client.post(path,data=form).status_code,302)
+        self.assertEqual(client.post(path,data=form).status_code,303)
         self.assertEqual(self.db.cards(eligible=True),[])
         self.assertEqual(self.db.cards()[0]['reviewed'],0)
 
@@ -587,7 +583,7 @@ class SystemTests(unittest.TestCase):
         row=self.db.one('SELECT * FROM resources')
         self.assertEqual(row['label'],'Справочная аэропорта')
         self.assertTrue(row['key'].startswith('contact_'))
-        self.assertIn('Справочная аэропорта',client.get('/cards/new').get_data(as_text=True))
+        self.assertIn('Справочная аэропорта',client.get('/cards/new').text)
 
     def test_plain_url_binding_does_not_replace_longer_urls_or_phone_substrings(self):
         self.db.execute("INSERT INTO resources(key,value,visibility) VALUES ('url','https://airport.example/pay','public')")
@@ -619,7 +615,7 @@ class SystemTests(unittest.TestCase):
         for phrase in ('Обычный режим','РАБОЧЕЕ МЕСТО','Локальное рабочее место','Ответы при ограничениях полётов'):
             self.assertNotIn(phrase,page)
         self.db.set_settings({'cover_mode':'true'})
-        self.assertIn('Ответы при ограничениях полётов',client.get('/cards').get_data(as_text=True))
+        self.assertIn('Ответы при ограничениях полётов',client.get('/cards').text)
 
     def test_bot_resumes_only_after_staff_action(self):
         self.accept()
@@ -634,23 +630,20 @@ class SystemTests(unittest.TestCase):
 
     def test_admin_requires_login_and_csrf(self):
         app=create_app(self.cfg,self.db)
-        client=app.test_client()
-        self.assertEqual(client.get("/cards").status_code,302)
+        client=TestClient(app,follow_redirects=False)
+        self.assertEqual(client.get("/cards").status_code,303)
         self.assertEqual(client.post("/login",data={"password":"test-password"}).status_code,400)
-        with client.session_transaction() as s:
-            token=s["csrf"]
-        self.assertEqual(client.post("/login",data={"csrf":token,"password":"test-password"}).status_code,302)
+        token=re.search(r'name="csrf" value="([^"]+)"',client.get("/login").text)[1]
+        self.assertEqual(client.post("/login",data={"csrf":token,"password":"test-password"}).status_code,303)
         self.assertEqual(client.get("/cards").status_code,200)
 
     def test_queue_ui_and_staff_action(self):
         self.accept()
         self.message("оператор")
         app=create_app(self.cfg,self.db)
-        client=app.test_client()
-        with client.session_transaction() as s:
-            s.update(authenticated=True,csrf="test")
+        client=authenticated_client(self.cfg,self.db)
         page=client.get("/queue")
-        self.assertIn(b"gim123?sel=11",page.data)
+        self.assertIn(b"gim123?sel=11",page.content)
         client.post("/dialogue/11",data={"csrf":"test","action":"take","staff_name":"Тест"})
         self.assertEqual(self.db.all("SELECT * FROM tickets")[0]["assigned_to"],"Тест")
         client.post("/dialogue/11",data={"csrf":"test","action":"resume"})
@@ -659,12 +652,10 @@ class SystemTests(unittest.TestCase):
     def test_render_escapes_user_text(self):
         self.card(title="<script>alert(1)</script>")
         app=create_app(self.cfg,self.db)
-        client=app.test_client()
-        with client.session_transaction() as s:
-            s.update(authenticated=True,csrf="test")
+        client=authenticated_client(self.cfg,self.db)
         page=client.get("/cards")
-        self.assertNotIn(b"<script>alert",page.data)
-        self.assertIn(b"&lt;script&gt;",page.data)
+        self.assertNotIn(b"<script>alert",page.content)
+        self.assertIn(b"&lt;script&gt;",page.content)
 
     def test_ai_validates_card_id(self):
         ai=GigaChat(self.cfg)
@@ -841,14 +832,14 @@ class SystemTests(unittest.TestCase):
     def test_queue_revision_changes_on_staff_reply_and_user_followup(self):
         sync,api,_,reply=self.staff_sync_fixture()
         client,_,_,_=self.editor()
-        first=client.get('/queue/state').get_json()['revision']
+        first=client.get('/queue/state').json()['revision']
         sync.receive(reply)
-        second=client.get('/queue/state').get_json()['revision']
+        second=client.get('/queue/state').json()['revision']
         self.assertNotEqual(first,second)
-        self.assertIn('VK 11',client.get('/queue?state=waiting_user').get_data(as_text=True))
-        self.assertIn('queue.js',client.get('/queue').get_data(as_text=True))
+        self.assertIn('VK 11',client.get('/queue?state=waiting_user').text)
+        self.assertIn('queue.js',client.get('/queue').text)
         self.engine.receive(11,11,'in-27','Ещё вопрос',vk_cmid=27,vk_date=1004)
-        third=client.get('/queue/state').get_json()['revision']
+        third=client.get('/queue/state').json()['revision']
         self.assertNotEqual(second,third)
         self.assertEqual(self.db.one('SELECT status FROM tickets')['status'],'open')
         self.assertEqual(client.get('/queue/state?state=invalid').status_code,400)
@@ -882,32 +873,28 @@ class SystemTests(unittest.TestCase):
         self.assertEqual(self.db.cards(),[])
 
     def test_admin_settings_hide_technical_options_and_preserve_search(self):
-        client=create_app(self.cfg,self.db).test_client()
-        with client.session_transaction() as session:
-            session.update(authenticated=True,csrf='test')
-        page=client.get('/settings').get_data(as_text=True)
+        client=authenticated_client(self.cfg,self.db)
+        page=client.get('/settings').text
         self.assertNotIn('name="search_strategy"',page)
         self.assertNotIn('name="search_limit"',page)
         client.post('/settings',data={'csrf':'test','consent_ready':'on','search_strategy':'bad','search_limit':'999'})
         self.assertEqual(self.db.setting('search_strategy'),'full')
         self.assertEqual(self.db.setting('search_limit'),'8')
-        page=client.get('/preview').get_data(as_text=True)
+        page=client.get('/preview').text
         self.assertNotIn('Лексический',page)
         self.assertNotIn('name="strategy"',page)
 
     def test_import_help_template_and_waiting_queue(self):
         self.accept(); self.message('оператор'); self.staff_reply()
-        client=create_app(self.cfg,self.db).test_client()
-        with client.session_transaction() as session:
-            session.update(authenticated=True,csrf='test')
-        self.assertIn('Ждём пользователя',client.get('/queue?state=waiting_user').get_data(as_text=True))
-        self.assertIn('VK 11',client.get('/queue?state=waiting_user').get_data(as_text=True))
-        self.assertNotIn('VK 11',client.get('/queue').get_data(as_text=True))
+        client=authenticated_client(self.cfg,self.db)
+        self.assertIn('Ждём пользователя',client.get('/queue?state=waiting_user').text)
+        self.assertIn('VK 11',client.get('/queue?state=waiting_user').text)
+        self.assertNotIn('VK 11',client.get('/queue').text)
         self.assertEqual(client.get('/dialogue/11').status_code,200)
-        self.assertIn('Скачать шаблон',client.get('/import').get_data(as_text=True))
+        self.assertIn('Скачать шаблон',client.get('/import').text)
         download=client.get('/import/template.xlsx')
         self.assertEqual(download.status_code,200)
-        book=load_workbook(io.BytesIO(download.data))
+        book=load_workbook(io.BytesIO(download.content))
         self.assertEqual([c.value for c in book.active[1]][:3],['Тема','Вопрос','Ответ'])
         book.close()
 

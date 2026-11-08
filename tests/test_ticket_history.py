@@ -6,6 +6,8 @@ from pulkovo.config import Config
 from pulkovo.db import Database
 from pulkovo.operator import OperatorInbox
 from pulkovo.web import create_app
+from fastapi.testclient import TestClient
+from web_client import authenticated_client
 
 
 class TicketHistoryTests(unittest.TestCase):
@@ -28,9 +30,7 @@ class TicketHistoryTests(unittest.TestCase):
             self.db.execute("INSERT INTO operator_outbox(client_key,peer_id,ticket_id,basis_request_id,text,staff_name,random_id,status,created_at,updated_at) VALUES (?,11,?,?,?,'Сотрудник',?,'cancelled',?,?)",(f'cancelled-{ident}',ident,request_id,f'Отменённый ответ {ident}',ident,start+5,start+5))
         for ident,at in [(1,160),(2,300),(3,510)]:
             self.db.execute('INSERT INTO staff_replies(event_key,peer_id,vk_cmid,admin_id,text,created_at,updated_at) VALUES (?,11,?,99,?,?,?)',(f'staff-{ident}',ident,f'Ответ сотрудника {ident}',at,at))
-        self.client=create_app(self.cfg,self.db).test_client()
-        with self.client.session_transaction() as session:
-            session.update(authenticated=True,csrf='test')
+        self.client=authenticated_client(self.cfg,self.db)
 
     def message(self,text,at,reply=None):
         self.serial+=1
@@ -62,29 +62,29 @@ class TicketHistoryTests(unittest.TestCase):
 
     def test_queue_has_one_dialogue_per_user_and_legacy_links_redirect(self):
         redirect=self.client.get('/queue?state=closed')
-        self.assertEqual(redirect.location,'/queue?state=all')
-        queue=self.client.get(redirect.location).get_data(as_text=True)
+        self.assertEqual(redirect.headers["location"],'/queue?state=all')
+        queue=self.client.get(redirect.headers["location"]).text
         self.assertNotIn('?ticket=',queue)
         self.assertEqual(queue.count('VK ID: 11'),1)
         self.assertIn('У бота',queue)
-        self.assertEqual(self.client.get('/dialogue/11?ticket=2').location,'/dialogue/11')
-        page=self.client.get('/dialogue/11').get_data(as_text=True)
+        self.assertEqual(self.client.get('/dialogue/11?ticket=2').headers["location"],'/dialogue/11')
+        page=self.client.get('/dialogue/11').text
         for text in ('Первый вопрос','Второй вопрос до передачи сотруднику','Сообщение после завершения'):
             self.assertIn(text,page)
         self.assertIn('data-updates="/dialogue/11/updates"',page)
         self.assertIn('id="reply-form"',page)
         self.assertNotIn('Обращение №',page)
-        revision=self.client.get('/dialogue/11/updates').get_json()['revision']
+        revision=self.client.get('/dialogue/11/updates').json()['revision']
         self.message('Еще одно сообщение',800)
-        update=self.client.get('/dialogue/11/updates',query_string={'ticket':2,'revision':revision}).get_json()
+        update=self.client.get('/dialogue/11/updates',params={'ticket':2,'revision':revision}).json()
         self.assertIn('Еще одно сообщение',update['html'])
         self.assertEqual(update['status'],'У бота')
 
     def test_page_and_poll_show_latest_30_messages_across_old_tickets(self):
         for index in range(50):
             self.message(f'Уникальное сообщение [{index}]',600+index)
-        page=self.client.get('/dialogue/11').get_data(as_text=True)
-        update=self.client.get('/dialogue/11/updates').get_json()['html']
+        page=self.client.get('/dialogue/11').text
+        update=self.client.get('/dialogue/11/updates').json()['html']
         for html in (page,update):
             self.assertEqual(html.count('data-message-id='),30)
             self.assertNotIn('Уникальное сообщение [19]',html)
@@ -107,15 +107,15 @@ class TicketHistoryTests(unittest.TestCase):
         self.db.resume(11)
         self.assertEqual(self.db.dialogue_rows('waiting_user'),[])
         self.assertEqual(len(self.db.dialogue_rows('all')),2)
-        page=self.client.get('/queue?state=all').get_data(as_text=True)
+        page=self.client.get('/queue?state=all').text
         self.assertIn('Вопрос боту',page)
 
     def test_invalid_or_foreign_ticket_never_falls_back_to_all_history(self):
         self.db.conversation(22)
         for suffix in ('','/updates'):
             for ticket,expected in [('bad',400),('-1',400),('',400),('999',404)]:
-                self.assertEqual(self.client.get('/dialogue/11'+suffix,query_string={'ticket':ticket}).status_code,expected)
-            self.assertEqual(self.client.get('/dialogue/22'+suffix,query_string={'ticket':1}).status_code,404)
+                self.assertEqual(self.client.get('/dialogue/11'+suffix,params={'ticket':ticket}).status_code,expected)
+            self.assertEqual(self.client.get('/dialogue/22'+suffix,params={'ticket':1}).status_code,404)
         with self.assertRaises(ValueError):
             self.inbox.timeline(22,1)
 
@@ -127,15 +127,15 @@ class TicketHistoryTests(unittest.TestCase):
         self.assertEqual(self.db.one('SELECT status FROM tickets WHERE id=?',(active,))['status'],'open')
         self.assertEqual(self.db.one("SELECT count(*) n FROM operator_outbox WHERE status='pending'")['n'],0)
         result=self.client.post('/dialogue/11?ticket=1',data={'csrf':'test','action':'topic','ticket_id':1,'topic_version':1,'topic':'Первая тема'})
-        self.assertEqual(result.status_code,302)
-        self.assertEqual(result.location,'/dialogue/11?ticket=1')
+        self.assertEqual(result.status_code,303)
+        self.assertEqual(result.headers["location"],'/dialogue/11?ticket=1')
         result=self.client.post('/dialogue/11?ticket=1',data={'csrf':'test','action':'topic','ticket_id':2,'topic_version':1,'topic':'Чужая тема'})
         self.assertEqual(result.status_code,400)
         self.db.execute('UPDATE conversations SET human_mode=1 WHERE peer_id=11')
-        page=self.client.get(f'/dialogue/11?ticket={active}',follow_redirects=True).get_data(as_text=True)
+        page=self.client.get(f'/dialogue/11?ticket={active}',follow_redirects=True).text
         self.assertIn('id="reply-form"',page)
         self.assertIn('Сообщение после завершения',page)
         self.assertIn('Второй вопрос до передачи сотруднику',page)
-        dashboard=self.client.get('/').get_data(as_text=True)
+        dashboard=self.client.get('/').text
         self.assertEqual(dashboard.count('/dialogue/11'),2)
         self.assertNotIn('?ticket=',dashboard)

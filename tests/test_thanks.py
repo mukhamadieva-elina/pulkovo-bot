@@ -10,6 +10,8 @@ from pulkovo.db import Database
 from pulkovo.dialogue_rules import is_thanks
 from pulkovo.engine import Engine
 from pulkovo.web import create_app
+from fastapi.testclient import TestClient
+from web_client import authenticated_client
 
 
 class ThanksTests(unittest.TestCase):
@@ -132,10 +134,9 @@ class ThanksTests(unittest.TestCase):
                     with self.assertRaises(AIError):ai.route('От души',[])
 
     def test_admin_preview_matches_local_thanks_without_calling_ai(self):
-        client=create_app(self.cfg,self.db).test_client()
-        with client.session_transaction() as session:session.update(authenticated=True,csrf='test')
+        client=authenticated_client(self.cfg,self.db)
         with patch('pulkovo.web.GigaChat') as ai:
-            page=client.post('/preview',data={'csrf':'test','action':'ai','text':'Спасибо','synthetic':'on'}).get_data(as_text=True)
+            page=client.post('/preview',data={'csrf':'test','action':'ai','text':'Спасибо','synthetic':'on'}).text
         ai.assert_not_called()
         self.assertIn('<blockquote>Пожалуйста!</blockquote>',page)
         self.assertNotIn('Обращение появится в очереди сотрудника',page)

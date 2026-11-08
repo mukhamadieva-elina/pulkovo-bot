@@ -13,6 +13,8 @@ from pulkovo.engine import Engine
 from pulkovo.operator import OperatorInbox
 from pulkovo.vk_staff import StaffReplySync
 from pulkovo.web import create_app
+from fastapi.testclient import TestClient
+from web_client import authenticated_client
 
 
 class TicketInactivityTests(unittest.TestCase):
@@ -34,9 +36,7 @@ class TicketInactivityTests(unittest.TestCase):
         self.api=Mock()
         self.api.messages.getHistory.return_value={'items':[self.reply]}
         self.sync=StaffReplySync(self.db,self.engine,self.api)
-        self.client=create_app(self.config,self.db).test_client()
-        with self.client.session_transaction() as session:
-            session.update(authenticated=True,csrf='test')
+        self.client=authenticated_client(self.config,self.db)
 
     def state(self):
         return self.db.one('SELECT * FROM tickets WHERE id=?',(self.ticket['id'],))
@@ -140,7 +140,7 @@ class TicketInactivityTests(unittest.TestCase):
 
     def test_manual_hold_and_global_timeout_setting(self):
         response=self.client.post('/dialogue/11',data={'csrf':'test','action':'auto_close','ticket_id':self.ticket['id'],'paused':'1'})
-        self.assertEqual(response.status_code,302)
+        self.assertEqual(response.status_code,303)
         self.assertFalse(self.expire())
         self.db.pause_auto_close(11,self.ticket['id'],False)
         for hours in ('0','48'):
@@ -162,16 +162,16 @@ class TicketInactivityTests(unittest.TestCase):
         self.engine.receive(22,22,'second-peer','оператор')
         self.db.resume(22)
         self.db.execute("INSERT INTO tickets(peer_id,request_id,reason,status,created_at,closed_at,closure_reason) VALUES (11,?,'staff_joined','closed',1,1,'inactivity')",(self.ticket['request_id'],))
-        stats=self.client.get('/statistics?days=1').get_data(as_text=True)
+        stats=self.client.get('/statistics?days=1').text
         self.assertIn('Закрыто по неактивности</span><strong>1</strong>',stats)
         self.assertIn('Завершено сотрудником</span><strong>1</strong>',stats)
-        queue=self.client.get('/queue?state=all').get_data(as_text=True)
+        queue=self.client.get('/queue?state=all').text
         self.assertEqual(queue.count('VK ID: 11'),1)
         self.assertIn('У бота',queue)
-        page=self.client.get('/dialogue/11').get_data(as_text=True)
+        page=self.client.get('/dialogue/11').text
         self.assertIn('У бота',page)
         self.assertIn('id="reply-form"',page)
-        csv=self.client.get('/tickets.csv?days=1').get_data(as_text=True)
+        csv=self.client.get('/tickets.csv?days=1').text
         self.assertEqual(csv.count('Закрыто по неактивности'),1)
         self.assertEqual(csv.count('Завершено сотрудником'),1)
 

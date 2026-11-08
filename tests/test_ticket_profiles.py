@@ -14,6 +14,8 @@ from pulkovo.engine import Engine
 from pulkovo.migrations import migrate
 from pulkovo.profiles import ProfileSync
 from pulkovo.web import create_app
+from fastapi.testclient import TestClient
+from web_client import authenticated_client
 
 
 class TicketProfileTests(unittest.TestCase):
@@ -25,9 +27,7 @@ class TicketProfileTests(unittest.TestCase):
         self.db.conversation(11)
         self.db.set_settings({'consent_version':'v1'})
         self.db.record_consent(11,11,'accepted','accept')
-        self.client=create_app(self.cfg,self.db).test_client()
-        with self.client.session_transaction() as session:
-            session.update(authenticated=True,csrf='test')
+        self.client=authenticated_client(self.cfg,self.db)
 
     def message(self,key,text,topic=None):
         ident=self.engine.receive(11,11,key,text)
@@ -56,7 +56,7 @@ class TicketProfileTests(unittest.TestCase):
         self.message('operator','оператор')
         self.db.resume(11)
         self.assertEqual(self.db.ticket_rows('closed')[0]['topic'],'')
-        self.assertIn('Тема не указана',self.client.get('/queue?state=all').get_data(as_text=True))
+        self.assertIn('Тема не указана',self.client.get('/queue?state=all').text)
 
     def test_topic_assigned_during_ai_handoff_is_saved_on_ticket(self):
         ident=self.message('incoming','Вопрос без ответа')
@@ -68,11 +68,11 @@ class TicketProfileTests(unittest.TestCase):
     def test_manual_topic_is_preserved_and_available_after_close(self):
         ticket=self.ticket();self.db.resume(11)
         result=self.client.post('/dialogue/11',data={'csrf':'test','action':'topic','ticket_id':ticket['id'],'topic_version':ticket['topic_version'],'topic':'Доступная среда'})
-        self.assertEqual(result.status_code,302)
+        self.assertEqual(result.status_code,303)
         self.db.refresh_ticket_topics(11)
         ticket=self.db.one('SELECT * FROM tickets')
         self.assertEqual((ticket['topic'],ticket['topic_source']),('Доступная среда','manual'))
-        self.assertIn('Доступная среда',self.client.get('/queue?state=all').get_data(as_text=True))
+        self.assertIn('Доступная среда',self.client.get('/queue?state=all').text)
         with self.assertRaises(ValueError):
             self.db.set_ticket_topic(22,ticket['id'],'Нельзя',ticket['topic_version'])
         with self.assertRaises(ValueError):
@@ -99,13 +99,13 @@ class TicketProfileTests(unittest.TestCase):
 
     def test_queue_names_ids_links_escaping_and_revision(self):
         self.ticket()
-        old=self.client.get('/queue/state').get_json()['revision']
+        old=self.client.get('/queue/state').json()['revision']
         api=Mock();api.users.get.return_value=[dict(id=11,first_name='Анна',last_name='<script>Иванова</script>')]
         ProfileSync(self.db,api).refresh()
-        new=self.client.get('/queue/state').get_json()['revision']
+        new=self.client.get('/queue/state').json()['revision']
         self.assertNotEqual(old,new)
         for path in ('/queue','/','/dialogue/11'):
-            page=self.client.get(path).get_data(as_text=True)
+            page=self.client.get(path).text
             self.assertIn('Анна &lt;script&gt;Иванова&lt;/script&gt;',page)
             self.assertIn('VK ID: 11',page)
             self.assertIn('https://vk.com/id11',page)

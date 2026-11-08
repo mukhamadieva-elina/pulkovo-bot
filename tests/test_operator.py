@@ -15,6 +15,8 @@ from pulkovo.engine import Engine
 from pulkovo.operator import OperatorInbox
 from pulkovo.vk_staff import StaffReplySync
 from pulkovo.web import create_app
+from fastapi.testclient import TestClient
+from web_client import authenticated_client
 from pulkovo.attachments import normalize_attachments, safe_image_url
 
 
@@ -32,9 +34,7 @@ class OperatorTests(unittest.TestCase):
         self.api=Mock()
         self.api.messages.send.return_value=45
         self.api.messages.getById.return_value={'items':[dict(peer_id=11,from_id=-123,id=45,conversation_message_id=12,date=int(time.time()))]}
-        self.client=create_app(self.cfg,self.db).test_client()
-        with self.client.session_transaction() as session:
-            session.update(authenticated=True,csrf='test',staff_name='Анна')
+        self.client=authenticated_client(self.cfg,self.db,staff_name='Анна')
 
     def queue(self,**changes):
         data=dict(peer_id=11,text='Ответ сотрудника',name='Анна',client_key='first-request-key-123',expected_revision=self.inbox.revision(11))
@@ -42,21 +42,21 @@ class OperatorTests(unittest.TestCase):
         return self.inbox.queue(**data)
 
     def form(self):
-        page=self.client.get('/dialogue/11').get_data(as_text=True)
+        page=self.client.get('/dialogue/11').text
         form=re.search(r'<form method="post" id="reply-form".*?</form>',page,re.S)[0]
         return {k:html.unescape(v) for k,v in re.findall(r'name="([^"]+)" value="([^"]*)"',form)}
 
     def test_web_reply_queues_once_and_shows_confirmed_history(self):
         form=self.form();form['reply']='Здравствуйте, ответ <script>без выполнения</script>'
-        self.assertEqual(self.client.post('/dialogue/11',data=form).status_code,302)
-        self.assertEqual(self.client.post('/dialogue/11',data=form).status_code,302)
+        self.assertEqual(self.client.post('/dialogue/11',data=form).status_code,303)
+        self.assertEqual(self.client.post('/dialogue/11',data=form).status_code,303)
         self.assertEqual(len(self.db.all('SELECT * FROM operator_outbox')),1)
         self.assertEqual(self.db.one('SELECT status FROM tickets')['status'],'open')
         self.assertTrue(self.inbox.deliver(self.api))
         self.assertEqual(self.db.one('SELECT status FROM operator_outbox')['status'],'sent')
         self.assertEqual(self.db.one('SELECT status FROM tickets')['status'],'waiting_user')
         self.assertTrue(self.db.conversation(11)['human_mode'])
-        page=self.client.get('/dialogue/11').get_data(as_text=True)
+        page=self.client.get('/dialogue/11').text
         self.assertIn('Здравствуйте, ответ &lt;script&gt;',page)
         self.assertNotIn('<script>без выполнения',page)
         self.assertIn('Анна',page)
@@ -66,7 +66,7 @@ class OperatorTests(unittest.TestCase):
     def test_web_stale_draft_survives_new_incoming_and_cannot_send_yet(self):
         form=self.form();form['reply']='Сохраните мой черновик'
         self.engine.receive(11,11,'in-11','Другой вопрос',vk_cmid=11,vk_date=int(time.time()))
-        page=self.client.post('/dialogue/11',data=form).get_data(as_text=True)
+        page=self.client.post('/dialogue/11',data=form).text
         self.assertIn('Переписка изменилась',page)
         self.assertIn('Сохраните мой черновик</textarea>',page)
         self.assertEqual(self.db.all('SELECT * FROM operator_outbox'),[])
@@ -121,7 +121,7 @@ class OperatorTests(unittest.TestCase):
         sync=StaffReplySync(self.db,self.engine,self.api)
         reply=dict(peer_id=11,from_id=-123,id=45,conversation_message_id=12,date=int(time.time()),admin_author_id=99,text='Ответ из приложения VK')
         self.assertTrue(sync.receive(reply))
-        self.assertIn('Ответ из приложения VK',self.client.get('/dialogue/11').get_data(as_text=True))
+        self.assertIn('Ответ из приложения VK',self.client.get('/dialogue/11').text)
         self.assertNotIn('Ответ из приложения VK',str(self.db.history(11)))
         self.assertFalse(sync.receive(reply))
         self.assertEqual(len(self.db.all('SELECT * FROM staff_replies')),1)
@@ -145,13 +145,13 @@ class OperatorTests(unittest.TestCase):
 
     def test_updates_authentication_and_revision(self):
         old=self.inbox.revision(11)
-        self.assertEqual(self.client.get('/dialogue/11/updates?revision='+old).get_json(),{'revision':old})
+        self.assertEqual(self.client.get('/dialogue/11/updates?revision='+old).json(),{'revision':old})
         self.queue()
-        data=self.client.get('/dialogue/11/updates?revision='+old).get_json()
+        data=self.client.get('/dialogue/11/updates?revision='+old).json()
         self.assertIn('Ответ сотрудника',data['html'])
         self.assertNotEqual(data['revision'],old)
-        client=create_app(self.cfg,self.db).test_client()
-        self.assertEqual(client.get('/dialogue/11/updates').status_code,302)
+        client=TestClient(create_app(self.cfg,self.db),follow_redirects=False)
+        self.assertEqual(client.get('/dialogue/11/updates').status_code,303)
         self.assertEqual(client.post('/dialogue/11',data={'action':'reply','reply':'X'}).status_code,400)
 
     def test_retention_removes_operator_text(self):
@@ -176,12 +176,12 @@ class OperatorTests(unittest.TestCase):
         attachments=normalize_attachments(raw)
         self.assertEqual(attachments[0]['url'],'https://vk.ru/sticker.png')
         self.engine.receive(11,11,'sticker-11','',attachments,vk_cmid=11)
-        page=self.client.get('/dialogue/11').get_data(as_text=True)
+        page=self.client.get('/dialogue/11').text
         self.assertIn('src="https://vk.ru/sticker.png"',page)
         self.assertIn('alt="Стикер"',page)
         self.assertNotIn('Текст не сохранён',page)
         self.assertNotIn('Вложение: доступно в VK',page)
-        update=self.client.get('/dialogue/11/updates').get_json()
+        update=self.client.get('/dialogue/11/updates').json()
         self.assertIn('alt="Стикер"',update['html'])
 
     def test_consent_button_before_permission_is_visible_without_saving_text(self):
@@ -196,7 +196,7 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(messages[1]['id'],f'bot-{ident}')
         for path in ('/dialogue/22','/dialogue/22/updates'):
             result=self.client.get(path)
-            page=result.get_json()['html'] if path.endswith('/updates') else result.get_data(as_text=True)
+            page=result.json()['html'] if path.endswith('/updates') else result.text
             self.assertIn('Выбрано «Согласен»',page)
             self.assertNotIn('Текст не сохранён',page)
         self.assertEqual(self.db.one('SELECT text FROM requests WHERE id=?',(ident,))['text'],'')
@@ -222,7 +222,7 @@ class OperatorTests(unittest.TestCase):
         raw=[{'type':'sticker','sticker':{'images_with_background':[{'width':256,'height':256,'url':'https://vk.ru/sticker.png'}]}},{'type':'photo','photo':{'sizes':[{'width':128,'height':128,'url':'https://photo.userapi.com/small.jpg'},{'width':800,'height':600,'url':'https://photo.userapi.com/photo.jpg'}]}}]
         sync=StaffReplySync(self.db,self.engine,self.api)
         sync.receive(dict(peer_id=11,from_id=-123,id=45,conversation_message_id=12,date=int(time.time()),admin_author_id=99,text='',attachments=raw))
-        page=self.client.get('/dialogue/11').get_data(as_text=True)
+        page=self.client.get('/dialogue/11').text
         self.assertIn('alt="Стикер"',page)
         self.assertIn('src="https://photo.userapi.com/photo.jpg"',page)
         self.assertNotIn('Ответ сотрудника — содержание доступно в VK',page)
@@ -232,13 +232,13 @@ class OperatorTests(unittest.TestCase):
             self.assertEqual(safe_image_url(url),'')
         self.engine.receive(11,11,'unsafe-11','',[{'type':'sticker','url':'https://evil.example/image.png'}],vk_cmid=11)
         page=self.client.get('/dialogue/11')
-        self.assertNotIn('https://evil.example',page.get_data(as_text=True))
+        self.assertNotIn('https://evil.example',page.text)
         self.assertIn('https://*.vk.ru',page.headers['Content-Security-Policy'])
         self.assertNotIn('img-src *',page.headers['Content-Security-Policy'])
 
     def test_other_attachments_show_type_and_link_to_correct_vk_dialogue(self):
         self.engine.receive(11,11,'doc-11','',[{'type':'doc'}],vk_cmid=11)
-        page=self.client.get('/dialogue/11/updates').get_json()['html']
+        page=self.client.get('/dialogue/11/updates').json()['html']
         self.assertIn('Документ',page)
         self.assertIn('https://vk.com/gim123?sel=11',page)
         self.assertNotIn('Текст не сохранён',page)

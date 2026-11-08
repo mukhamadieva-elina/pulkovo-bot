@@ -34,5 +34,5 @@
 <aside>
 <section class="panel"><h3>Источник</h3><p class="small">{{card.source or 'Создана вручную'}}</p>{% for issue in card.issues|jsonlist %}<p class="issue">{{issue}}</p>{% endfor %}</section>
 <section class="panel"><h3>История изменений</h3>{% for v in versions %}<details><summary>Версия {{v.version}} · {{v.created_at|date}}</summary><p class="small">{{v.card.title}}</p><blockquote class="version-answer">{{v.answer}}</blockquote><form method="post" action="/cards/{{card.id}}/restore/{{v.version}}"><input type="hidden" name="csrf" value="{{csrf}}"><button>Восстановить в черновик</button></form></details>{% else %}<p class="muted">Появится после сохранения.</p>{% endfor %}</section></aside></div>
-<script src="{{url_for('static',filename='editor.js')}}" defer></script>
+<script src="{{url_for('static',path='editor.js')}}" defer></script>
 {% endblock %}
