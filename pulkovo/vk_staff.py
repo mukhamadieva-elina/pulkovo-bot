@@ -7,6 +7,7 @@ import requests
 import vk_api
 from .operator import OperatorInbox
 from .attachments import normalize_attachments
+from .feedback import is_feedback_payload
 
 
 def metadata(message):
@@ -89,7 +90,7 @@ class StaffReplySync:
         if not replies:
             return False
         newest = max(replies,key=lambda m:(m.get('conversation_message_id',0),m.get('date',0)))
-        incoming = [m for m in items if m.get('from_id') == ticket['peer_id']]
+        incoming = [m for m in items if m.get('from_id') == ticket['peer_id'] and not is_feedback_payload(m.get('payload'))]
         unconfirmed_newer=any(self.is_community_reply(m) and not m.get('admin_author_id')
                               and not self.engine.is_own_reply(m) and not self.inbox.match(m)
                               and (m.get('conversation_message_id',0)>newest.get('conversation_message_id',0)

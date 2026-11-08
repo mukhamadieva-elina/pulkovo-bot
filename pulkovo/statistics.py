@@ -70,9 +70,10 @@ _RESULTS = """
           AND coalesce(r.outcome,'') NOT IN
               ('thanks','consent_required','consent_accepted','consent_revoked')
           AND coalesce(r.reason,'')!='consent_declined'
+          AND coalesce(r.outcome,'') NOT LIKE 'feedback%'
           AND coalesce(json_extract(
               CASE WHEN json_valid(r.payload) THEN r.payload ELSE '{}' END,
-              '$.action'),'') NOT IN ('agree','decline','revoke')
+              '$.action'),'') NOT IN ('agree','decline','revoke','feedback')
     )
 """
 _COUNTS = """coalesce(sum(result='bot'),0) automated,
@@ -112,3 +113,41 @@ def automation_report(db, since, until):
         rows.append(with_percent(row))
         day += timedelta(days=1)
     return dict(summary=with_percent(totals), days=list(reversed(rows)))
+
+
+def feedback_percent(row):
+    row['rated'] = row['good'] + row['bad']
+    row['percent'] = 100 * row['good'] / row['rated'] if row['rated'] else None
+    row['response_percent'] = 100 * row['rated'] / row['sent'] if row['sent'] else None
+    return row
+
+
+def feedback_report(db, since, until):
+    # Cohort by invitation date. Later votes update that invitation's day.
+    with db.connect() as con:
+        con.create_function('moscow_day', 1, lambda value: datetime.fromtimestamp(value, MOSCOW).date().isoformat(), deterministic=True)
+        found = con.execute("""SELECT moscow_day(sent_at) day, count(*) sent,
+            coalesce(sum(rating='good'),0) good, coalesce(sum(rating='bad'),0) bad
+            FROM feedback_surveys WHERE sent_at>=? AND sent_at<? GROUP BY day""", (since, until)).fetchall()
+    by_day = {row['day']: dict(row) for row in found}
+    totals = dict(sent=0, good=0, bad=0)
+    for row in by_day.values():
+        for key in totals:
+            totals[key] += row[key]
+    first = datetime.fromtimestamp(since, MOSCOW)
+    end = datetime.fromtimestamp(until, MOSCOW)
+    last = end.date()-timedelta(days=1) if end.time() == time.min and end > first else end.date()
+    day, rows = first.date(), []
+    while day <= last:
+        row = by_day.get(day.isoformat(), dict(day=day.isoformat(), sent=0, good=0, bad=0))
+        row['label'] = day.strftime('%d.%m.%Y')
+        rows.append(feedback_percent(row))
+        day += timedelta(days=1)
+    negative = db.all("""SELECT s.peer_id,s.sent_at,s.rated_at,r.text,r.reply,r.topic,
+        trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')) user_name
+        FROM feedback_surveys s JOIN requests r ON r.id=s.request_id
+        JOIN conversations c ON c.peer_id=s.peer_id
+        LEFT JOIN vk_profiles p ON p.user_id=c.user_id
+        WHERE s.sent_at>=? AND s.sent_at<? AND s.rating='bad'
+        ORDER BY s.rated_at DESC,s.id DESC LIMIT 10""", (since, until))
+    return dict(summary=feedback_percent(totals), days=list(reversed(rows)), negative=negative)

@@ -88,7 +88,7 @@ class SystemTests(unittest.TestCase):
     def test_migrations_idempotent(self):
         self.card()
         Database(self.path)
-        self.assertEqual(len(self.db.all("SELECT * FROM schema_migrations")),8)
+        self.assertEqual(len(self.db.all("SELECT * FROM schema_migrations")),9)
         self.assertEqual(len(self.db.cards()),1)
 
     def test_upgrade_preserves_data_and_backs_up(self):

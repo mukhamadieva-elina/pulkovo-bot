@@ -1,13 +1,13 @@
 import contextlib
 import json
 import re
-import secrets
 import sqlite3
 import time
 from pathlib import Path
 
 from .migrations import migrate
 from .resources import bind_answer
+from .feedback import cancel_pending, record_activity, message_random_id
 
 
 DEFAULT_SETTINGS = {
@@ -15,7 +15,7 @@ DEFAULT_SETTINGS = {
     "max_clarifications": "2", "consent_version": "draft-1", "consent_ready": "false",
     "consent_url": "", "consent_text": "Здравствуйте! Я виртуальный помощник аэропорта. Для обработки ваших вопросов и изображений используется сторонний ИИ-сервис GigaChat. Ознакомьтесь с отдельным согласием на обработку данных и выберите способ общения.",
     "handoff_text": "Обращение передано сотруднику. Автоматические ответы в этом диалоге приостановлены.",
-    "retention_days": "30", "waiting_user_timeout_hours": "24",
+    "retention_days": "30", "waiting_user_timeout_hours": "24", "feedback_enabled": "true",
 }
 
 
@@ -63,6 +63,8 @@ class Database:
     def set_settings(self, values):
         with self.connect() as con:
             con.executemany("INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [(k, str(v)) for k, v in values.items()])
+            if values.get('feedback_enabled') == 'false':
+                con.execute("UPDATE feedback_surveys SET status='cancelled',reason='disabled',updated_at=? WHERE status IN ('pending','sending')", (time.time(),))
 
     def _refresh_ticket_topics(self, con, peer_id):
         for ticket in con.execute("SELECT * FROM tickets WHERE peer_id=? AND status IN ('open','waiting_user') AND topic_source='auto'",(peer_id,)).fetchall():
@@ -190,6 +192,7 @@ class Database:
             if not inserted:
                 return
             con.execute("UPDATE conversations SET consent_state=?,consent_version=?,generation=generation+1,clarification_count=0,updated_at=? WHERE peer_id=?", (action, settings["consent_version"], time.time(), peer_id))
+            cancel_pending(con,peer_id,'consent_changed')
             if action != "accepted":
                 con.execute("UPDATE requests SET text='',attachments='[]',image_descriptions='[]' WHERE peer_id=?", (peer_id,))
                 con.execute("UPDATE requests SET status='cancelled',reply=NULL,keyboard=NULL WHERE peer_id=? AND status='ready' AND ai_generation IS NOT NULL", (peer_id,))
@@ -198,16 +201,18 @@ class Database:
         c = self.conversation(peer_id)
         return c["consent_state"] == "accepted" and c["consent_version"] == self.setting("consent_version") and not c["human_mode"] and (generation is None or c["generation"] == generation)
 
-    def enqueue(self, peer_id, user_id, event_key, text="", attachments=None, payload="", *, vk_cmid=0, vk_date=0):
+    def enqueue(self, peer_id, user_id, event_key, text="", attachments=None, payload="", *, vk_cmid=0, vk_date=0, is_feedback=False):
         c = self.conversation(peer_id, user_id)
         # Переписка с сотрудником хранится для админки независимо от согласия на ИИ.
         # Передача в ИИ отдельно ограничена allowed() и human_mode.
         permitted = bool(c['human_mode']) or (c["consent_state"] == "accepted" and c["consent_version"] == self.setting("consent_version"))
         attachments = attachments or []
         with self.connect() as con:
-            cur = con.execute("INSERT OR IGNORE INTO requests(event_key,peer_id,user_id,text,attachments,input_type,payload,random_id,created_at,updated_at,vk_cmid,vk_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, peer_id, user_id, text if permitted else "", json.dumps(attachments) if permitted else "[]", "mixed" if text and attachments else "image" if attachments else "text", payload, secrets.randbelow(2**31-1)+1, time.time(), time.time(), vk_cmid, vk_date))
-            if cur.rowcount:
+            con.execute('BEGIN IMMEDIATE')
+            cur = con.execute("INSERT OR IGNORE INTO requests(event_key,peer_id,user_id,text,attachments,input_type,payload,random_id,created_at,updated_at,vk_cmid,vk_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, peer_id, user_id, text if permitted else "", json.dumps(attachments) if permitted else "[]", "mixed" if text and attachments else "image" if attachments else "text", payload, message_random_id(con), time.time(), time.time(), vk_cmid, vk_date))
+            if cur.rowcount and not is_feedback:
                 con.execute("UPDATE tickets SET status='open' WHERE peer_id=? AND status='waiting_user'", (peer_id,))
+                record_activity(con,peer_id,cur.lastrowid,time.time())
             return cur.lastrowid
 
     def staff_replied(self, peer_id, event_key, admin_id, vk_cmid, sent_at, *, expected_ticket_id=None, text=None, attachments=None, source='vk', staff_name='', basis_request_id=None, history_only=False):
@@ -218,7 +223,8 @@ class Database:
             # сотрудником, пока выполнялся запрос к VK.
             if expected_ticket_id is not None and (not active or active['id'] != expected_ticket_id):
                 return False
-            latest = con.execute('SELECT * FROM requests WHERE peer_id=? ORDER BY id DESC LIMIT 1', (peer_id,)).fetchone()
+            latest = con.execute("""SELECT * FROM requests WHERE peer_id=? AND coalesce(json_extract(
+                CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,'$.action'),'')!='feedback' ORDER BY id DESC LIMIT 1""", (peer_id,)).fetchone()
             existing = con.execute('SELECT id,text,attachments,vk_cmid FROM staff_replies WHERE event_key=? OR (peer_id=? AND vk_cmid>0 AND vk_cmid=?)',(event_key,peer_id,vk_cmid)).fetchone()
             if existing:
                 body = text if text is not None else existing['text']
@@ -247,6 +253,7 @@ class Database:
                 con.execute('INSERT INTO tickets(peer_id,request_id,reason,status,created_at,last_staff_reply_at) VALUES (?,?,?,?,?,?)', (peer_id,latest['id'],'staff_joined',status,time.time(),sent_at))
             self._refresh_ticket_topics(con,peer_id)
             con.execute('UPDATE conversations SET human_mode=1,generation=generation+1,updated_at=? WHERE peer_id=?', (time.time(),peer_id))
+            cancel_pending(con,peer_id,'staff_joined')
             con.execute("UPDATE requests SET status='cancelled',reason='staff_joined',reply=NULL WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks')", (peer_id,))
             return True
 
@@ -254,6 +261,7 @@ class Database:
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
             con.execute("UPDATE conversations SET human_mode=1,generation=generation+1,updated_at=? WHERE peer_id=?", (time.time(), request["peer_id"]))
+            cancel_pending(con,request['peer_id'],'handoff')
             con.execute("INSERT OR IGNORE INTO tickets(peer_id,request_id,reason,created_at) VALUES (?,?,?,?)", (request["peer_id"], request["id"], reason, time.time()))
             self._refresh_ticket_topics(con,request['peer_id'])
 
@@ -264,6 +272,7 @@ class Database:
                 raise ValueError('Сначала дождитесь отправки ответа или отмените неотправленный ответ.')
             self._refresh_ticket_topics(con,peer_id)
             con.execute("UPDATE conversations SET human_mode=0,generation=generation+1,clarification_count=0,updated_at=? WHERE peer_id=?", (time.time(), peer_id))
+            cancel_pending(con,peer_id,'returned_to_bot')
             con.execute("UPDATE tickets SET status='closed',closed_at=?,closure_reason='manual' WHERE peer_id=? AND status IN ('open','waiting_user')", (time.time(), peer_id))
             con.execute("INSERT INTO audit(action,target,created_at) VALUES ('resume_bot',?,?)", (str(peer_id), time.time()))
 

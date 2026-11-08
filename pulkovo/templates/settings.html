@@ -7,6 +7,8 @@
 <label>Срок ожидания ответа пользователя, часов<input type="number" name="waiting_user_timeout_hours" value="{{settings.waiting_user_timeout_hours}}" min="0" max="720" required></label>
 <p class="small muted">Только для статуса «Ждём пользователя», от последнего ответа сотрудника. 0 отключает таймер. Закрытие не отправляет сообщение пассажиру; бот подключится при новом вопросе. Новый срок действует и для уже ожидающих обращений.</p>
 <label class="checkbox"><input type="checkbox" name="cover_mode" {{'checked' if settings.cover_mode=='true' else ''}}> Включить ответы при ограничениях полётов (КОВЁР)</label>
+<label class="checkbox"><input type="checkbox" name="feedback_enabled" {{'checked' if settings.feedback_enabled=='true' else ''}}> Просить оценить помощь бота</label>
+<p class="small muted">Через 60 минут тишины после готового ответа, если сотрудник не подключался и бот не ждет уточнения. Новые сообщения начинают отсчет заново. Не чаще одного опроса в 24 часа для пользователя, без напоминаний. Оценки доступны в статистике.</p>
 <details><summary>Дополнительные настройки</summary>
 <label>Сколько уточнений может задать бот<input type="number" name="max_clarifications" value="{{settings.max_clarifications}}" min="0" max="5"></label>
 <label>Хранить содержание обращений, дней<input type="number" name="retention_days" value="{{settings.retention_days}}" min="1" max="365"></label>

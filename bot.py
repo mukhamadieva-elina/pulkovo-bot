@@ -19,6 +19,7 @@ from pulkovo.vk_staff import StaffReplySync
 from pulkovo.operator import OperatorInbox
 from pulkovo.attachments import normalize_attachments
 from pulkovo.profiles import ProfileSync
+from pulkovo.feedback import Feedback
 
 
 class VKSession(requests.Session):
@@ -36,7 +37,7 @@ class VKTransport:
         self.api = vk_session(config).get_api()
 
     def send(self, peer_id, text, keyboard, random_id):
-        self.api.messages.send(peer_id=peer_id,message=text,keyboard=keyboard,random_id=random_id,payload=json.dumps({'pulkovo_bot':random_id}))
+        return self.api.messages.send(peer_id=peer_id,message=text,keyboard=keyboard,random_id=random_id,payload=json.dumps({'pulkovo_bot':random_id}))
 
     def mark_human(self, peer_id):
         try:
@@ -67,6 +68,7 @@ def main():
     db.execute("UPDATE requests SET status='pending' WHERE status='processing'")
     db.execute("UPDATE requests SET status='ready' WHERE status='sending'")
     db.execute("UPDATE operator_outbox SET status='pending' WHERE status='sending'")
+    db.execute("UPDATE feedback_surveys SET status='pending' WHERE status='sending'")
     db.purge()
     stop = threading.Event()
 
@@ -123,6 +125,19 @@ def main():
             stop.wait(.5)
 
     threading.Thread(target=operator_worker,name='operator-outbox',daemon=True).start()
+
+    def feedback_worker():
+        feedback=Feedback(db)
+        transport=VKTransport(config)
+        while not stop.is_set():
+            try:
+                if feedback.deliver(transport,ingress):
+                    continue
+            except Exception:
+                logging.warning('Не удалось проверить опрос; повтор в следующем цикле.')
+            stop.wait(15)
+
+    threading.Thread(target=feedback_worker,name='feedback-surveys',daemon=True).start()
     with ThreadPoolExecutor(max_workers=4,thread_name_prefix="dialogue") as pool:
         for _ in range(4):
             pool.submit(worker)

@@ -30,7 +30,7 @@ from .search import searcher
 from .resources import display_answer, resource_keys, answer_parts
 from .topics import topic_label
 from .operator import OperatorInbox
-from .statistics import MOSCOW, PERIODS, automation_report, statistics_period
+from .statistics import MOSCOW, PERIODS, automation_report, feedback_report, statistics_period
 from .attachments import safe_image_url, IMAGE_DOMAINS, ATTACHMENT_LABELS
 
 LABELS = {"answer":"Готовый ответ","clarify":"Уточнение ИИ","handoff":"Передано сотруднику","human_mode":"Ожидает сотрудника","consent_required":"Ожидает согласия","consent_accepted":"Согласие получено","consent_revoked":"Согласие отозвано","pending":"В очереди","processing":"Обработка","ready":"К отправке","sending":"Отправка","sent":"Отправлено","failed":"Ошибка отправки","cancelled":"Отменено","done":"Обработано","draft":"Черновик","published":"Опубликована","disabled":"Отключена","public":"Публичная","internal":"Для сотрудников","any":"Всегда","normal":"Обычный режим","cover":"КОВЁР","open":"Ожидает","closed":"Закрыто","complaint":"Жалоба","no_matching_answer":"Ответ не найден","user_requested_operator":"Запрос сотрудника","consent_declined":"Отказ от ИИ","consent_not_configured":"Согласие ещё не настроено","external_processing_not_enabled":"Передача в ИИ выключена","no_published_cards":"Нет опубликованных ответов","processing_error":"Ошибка обработки","clarification_limit":"Лимит уточнений","unsupported_attachment":"Неподдерживаемое вложение"}
@@ -39,6 +39,7 @@ LABELS = {"answer":"Готовый ответ","clarify":"Уточнение И�
 LABELS.update({"delivery_failed":"Не удалось отправить ответ", "state_changed_before_send":"Ответ отменён после изменения настроек или карточки", "empty_message":"Нет текста или поддерживаемого изображения", "accepted":"Получено", "declined":"Отказ", "revoked":"Отозвано", "unknown":"Не получено", "awaiting_operator":"Ожидает сотрудника"})
 LABELS.update({'waiting_user':'Ждём пользователя','staff_joined':'Ответил сотрудник'})
 LABELS.update({'thanks':'Благодарность','acknowledge':'Ответ на благодарность','bot':'У бота'})
+LABELS.update({'feedback':'Оценка помощи бота','feedback_duplicate':'Оценка уже сохранена','feedback_invalid':'Недействительная оценка'})
 LABELS.update({'inactivity':'Закрыто по неактивности','manual':'Завершено сотрудником'})
 LABELS.update({'normal':'Без ограничений полётов','cover':'При ограничениях полётов (КОВЁР)'})
 
@@ -439,7 +440,20 @@ def create_app(config, database=None):
             counts[topic_label(row['topic']) or 'Тема не указана']+=row['n']
         topics=[dict(topic=topic,n=n) for topic,n in sorted(counts.items(),key=lambda pair:(-pair[1],pair[0]))]
         closures=db.one("SELECT sum(closure_reason='inactivity') inactivity,sum(closure_reason='manual') manual FROM tickets WHERE status='closed' AND closed_at>=? AND closed_at<?",bounds)
-        return render(request, "statistics.html",title="Статистика",totals=totals,outcomes=outcomes,topics=topics,period=period,periods=PERIODS,today=today,from_date=period['from_date'],to_date=period['to_date'],closures=closures,automation=automation['summary'],daily=automation['days'])
+        return render(request, "statistics.html",title="Статистика",totals=totals,outcomes=outcomes,topics=topics,period=period,periods=PERIODS,today=today,from_date=period['from_date'],to_date=period['to_date'],closures=closures,automation=automation['summary'],daily=automation['days'],feedback=feedback_report(db,*bounds))
+
+    @router.get('/feedback.csv')
+    def export_feedback(request: Request):
+        period=selected_statistics_period(request)
+        report=feedback_report(db,period['since'],period['until'])
+        output=io.StringIO()
+        writer=csv.writer(output)
+        writer.writerow(['Дата опроса (Москва)','Отправлено опросов','Хорошо','Плохо','Всего оценок','Доля Хорошо, %','Доля ответивших, %'])
+        for row in report['days']:
+            writer.writerow([row['day'],row['sent'],row['good'],row['bad'],row['rated'],
+                f"{row['percent']:.1f}" if row['percent'] is not None else '',
+                f"{row['response_percent']:.1f}" if row['response_percent'] is not None else ''])
+        return Response('\ufeff'+output.getvalue(),media_type='text/csv',headers={'Content-Disposition':'attachment; filename=feedback-by-day.csv'})
 
     @router.get('/automation.csv')
     def export_automation(request: Request):
@@ -484,7 +498,7 @@ def create_app(config, database=None):
             old=db.settings()
             values={key:request.state.form.get(key,old[key]).strip() for key in ("max_clarifications","consent_url","consent_text","handoff_text","retention_days","waiting_user_timeout_hours")}
             values.update({key:old[key] for key in ('search_strategy','search_limit','consent_version')})
-            values.update(cover_mode=str(request.state.form.get("cover_mode")=="on").lower(),consent_ready=str(request.state.form.get("consent_ready")=="on").lower())
+            values.update(cover_mode=str(request.state.form.get("cover_mode")=="on").lower(),consent_ready=str(request.state.form.get("consent_ready")=="on").lower(),feedback_enabled=str(request.state.form.get('feedback_enabled')=='on').lower())
             try:
                 if not 0<=int(values["max_clarifications"])<=5 or not 1<=int(values["retention_days"])<=365:
                     raise ValueError("Проверьте число уточнений и срок хранения.")

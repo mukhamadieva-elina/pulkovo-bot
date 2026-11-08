@@ -5,6 +5,7 @@ from .ai import AIError, AccessStopped, download_image
 from .consent import consent_configured, consent_message
 from .search import searcher
 from .dialogue_rules import is_thanks
+from .feedback import Feedback
 
 
 def keyboard(buttons):
@@ -37,11 +38,13 @@ class Engine:
         commands = {"/оператор":"operator","оператор":"operator","сотрудник":"operator","связаться с сотрудником":"operator","/отозвать":"revoke","отозвать согласие":"revoke"}
         if text.strip().lower() in commands:
             control = {"action":commands[text.strip().lower()]}
-        if control.get("action") not in ("agree","decline","revoke","operator"):
+        if control.get("action") not in ("agree","decline","revoke","operator","feedback"):
             control = {}
+        if control.get('action') == 'feedback':
+            control={key:control.get(key) for key in ('action','token','rating')}
         if not control and not attachments and is_thanks(text):
             control={'local_intent':'thanks'}
-        self.db.enqueue(peer_id,user_id,event_key,text,attachments,json.dumps(control),vk_cmid=vk_cmid,vk_date=vk_date)
+        self.db.enqueue(peer_id,user_id,event_key,text,attachments,json.dumps(control),vk_cmid=vk_cmid,vk_date=vk_date,is_feedback=control.get('action')=='feedback')
         request = self.db.one("SELECT * FROM requests WHERE event_key=?",(event_key,))
         if control.get("action") in ("decline","revoke"):
             self.db.record_consent(peer_id,user_id,"declined" if control["action"]=="decline" else "revoked",event_key)
@@ -59,6 +62,8 @@ class Engine:
             marker = None
         for random_id in (message.get('random_id'), marker):
             if random_id and self.db.one('SELECT id FROM requests WHERE peer_id=? AND random_id=?', (peer, random_id)):
+                return True
+            if random_id and self.db.one('SELECT id FROM feedback_surveys WHERE peer_id=? AND random_id=?', (peer, random_id)):
                 return True
         return False
 
@@ -91,6 +96,10 @@ class Engine:
         peer = request["peer_id"]
         try:
             action = json.loads(request["payload"] or "{}").get("action")
+            if action == 'feedback':
+                result=Feedback(self.db).vote(peer,json.loads(request['payload']))
+                self.prepare(request,'feedback' if result=='accepted' else 'feedback_'+result,'Спасибо за оценку!' if result=='accepted' else None)
+                return
             settings = self.db.settings()
             if action == "revoke":
                 self.prepare(request,"consent_revoked","Согласие отозвано. Новые сообщения не будут передаваться ИИ. При необходимости выберите общение с сотрудником.",keys=self.consent_keyboard())
@@ -242,11 +251,11 @@ class Engine:
         except Exception:
             attempts = request["send_attempts"]+1
             self.db.execute("UPDATE requests SET status=?,send_attempts=?,error='Ошибка отправки VK',updated_at=? WHERE id=?",("failed" if attempts>=3 else "ready",attempts,time.time(),request["id"]))
-            if attempts >= 3:
+            if attempts >= 3 and not request['outcome'].startswith('feedback'):
                 self.db.handoff(request,"delivery_failed")
                 transport.mark_human(request["peer_id"])
         else:
-            self.db.execute("UPDATE requests SET status='sent',send_attempts=send_attempts+1,updated_at=? WHERE id=?",(time.time(),request["id"]))
+            Feedback(self.db).record_bot_delivery(request)
             if request["outcome"] == "handoff":
                 transport.mark_human(request["peer_id"])
         return True
