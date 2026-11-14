@@ -65,7 +65,7 @@ class ImageClarificationTests(unittest.TestCase):
         self.assertEqual(row['outcome'],'answer')
         self.assertEqual(row['reply'],'Опубликованный ответ о местах ожидания.')
         self.engine.deliver(self.transport)
-        self.assertEqual(self.db.history(11),[])
+        self.assertEqual(self.db.history(11)[-1]['reply'],row['reply'])
 
     def test_photo_can_answer_existing_clarification(self):
         self.ai.route.return_value=self.ai.clarify_photo.return_value

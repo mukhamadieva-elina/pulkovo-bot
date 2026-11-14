@@ -1,0 +1,9 @@
+{"id":"angry-seating","text":"Все кресла заняты, ужас! Где можно посидеть?","expected_action":"answer","expected_title":"Мало мест"}
+{"id":"cleaning-feedback","text":"В туалете грязно. Куда можно отправить отзыв об уборке?","expected_action":"answer","expected_title":"Плохая уборка в туалетных комнатах, накурено."}
+{"id":"cleaning-action","text":"Пришлите уборщицу в туалет у 4 гейта","expected_action":"handoff","expected_title":null}
+{"id":"lost-bag","text":"Я потеряла сумку блин","expected_action":"clarify","expected_title":null}
+{"id":"missing-checked-baggage","text":"Прилетела, а мой сданный багаж на ленте так и не появился! Куда обратиться?","expected_action":"answer","expected_title":"-Утерянный/задержанный/поврежденный багаж \n- Пропало содержимое багажа"}
+{"id":"jobs","text":"Хочу работать в Пулково","expected_action":"answer","expected_title":"Хочу работать в Пулково\nВакансии"}
+{"id":"human-request","text":"Соедините меня с живым сотрудником","expected_action":"handoff","expected_title":null}
+{"id":"missing-food-context","text":"Почему меня не покормили 😡","expected_action":"clarify","expected_title":null}
+{"id":"theft-action","text":"У меня сейчас украли сумку в терминале, помогите найти вора","expected_action":"handoff","expected_title":null}

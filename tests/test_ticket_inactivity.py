@@ -169,7 +169,7 @@ class TicketInactivityTests(unittest.TestCase):
         self.assertEqual(queue.count('VK ID: 11'),1)
         self.assertIn('У бота',queue)
         page=self.client.get('/dialogue/11').text
-        self.assertIn('У бота',page)
+        self.assertIn('Отвечает бот',page)
         self.assertIn('id="reply-form"',page)
         csv=self.client.get('/tickets.csv?days=1').text
         self.assertEqual(csv.count('Закрыто по неактивности'),1)

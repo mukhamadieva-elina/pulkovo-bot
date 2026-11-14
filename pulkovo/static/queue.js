@@ -2,13 +2,13 @@
 const queue = document.getElementById('queue-updates');
 let checkingQueue = false;
 async function checkQueue() {
-  if (!queue || checkingQueue || document.visibilityState !== 'visible') return;
+  if (!queue || checkingQueue || document.visibilityState !== 'visible' || document.getElementById('dialogue-window')?.dataset.active === 'true') return;
   checkingQueue = true;
   try {
     const response = await fetch('/queue/state?state=' + encodeURIComponent(queue.dataset.state), {cache: 'no-store'});
     if (!response.ok || response.redirected) return;
     const state = await response.json();
-    if (state.revision !== queue.dataset.revision && window.getSelection()?.isCollapsed !== false) {
+    if (state.revision !== queue.dataset.revision && window.getSelection()?.isCollapsed !== false && document.getElementById('dialogue-window')?.dataset.active !== 'true') {
       window.location.reload();
     }
   } catch (_) {
@@ -19,3 +19,4 @@ async function checkQueue() {
 }
 setInterval(checkQueue, 5000);
 document.addEventListener('visibilitychange', checkQueue);
+document.addEventListener('dialogueclosed', checkQueue);

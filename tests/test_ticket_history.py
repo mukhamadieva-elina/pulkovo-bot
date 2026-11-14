@@ -78,7 +78,7 @@ class TicketHistoryTests(unittest.TestCase):
         self.message('Еще одно сообщение',800)
         update=self.client.get('/dialogue/11/updates',params={'ticket':2,'revision':revision}).json()
         self.assertIn('Еще одно сообщение',update['html'])
-        self.assertEqual(update['status'],'У бота')
+        self.assertEqual(update['status'],'Отвечает бот')
 
     def test_page_and_poll_show_latest_30_messages_across_old_tickets(self):
         for index in range(50):

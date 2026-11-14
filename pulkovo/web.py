@@ -32,6 +32,8 @@ from .topics import topic_label
 from .operator import OperatorInbox
 from .statistics import MOSCOW, PERIODS, automation_report, feedback_report, statistics_period
 from .attachments import safe_image_url, IMAGE_DOMAINS, ATTACHMENT_LABELS
+from .routing import handoff_reason, needs_full_catalog
+from .protection import Protection
 
 LABELS = {"answer":"Готовый ответ","clarify":"Уточнение ИИ","handoff":"Передано сотруднику","human_mode":"Ожидает сотрудника","consent_required":"Ожидает согласия","consent_accepted":"Согласие получено","consent_revoked":"Согласие отозвано","pending":"В очереди","processing":"Обработка","ready":"К отправке","sending":"Отправка","sent":"Отправлено","failed":"Ошибка отправки","cancelled":"Отменено","done":"Обработано","draft":"Черновик","published":"Опубликована","disabled":"Отключена","public":"Публичная","internal":"Для сотрудников","any":"Всегда","normal":"Обычный режим","cover":"КОВЁР","open":"Ожидает","closed":"Закрыто","complaint":"Жалоба","no_matching_answer":"Ответ не найден","user_requested_operator":"Запрос сотрудника","consent_declined":"Отказ от ИИ","consent_not_configured":"Согласие ещё не настроено","external_processing_not_enabled":"Передача в ИИ выключена","no_published_cards":"Нет опубликованных ответов","processing_error":"Ошибка обработки","clarification_limit":"Лимит уточнений","unsupported_attachment":"Неподдерживаемое вложение"}
 
@@ -42,6 +44,7 @@ LABELS.update({'thanks':'Благодарность','acknowledge':'Ответ �
 LABELS.update({'feedback':'Оценка помощи бота','feedback_duplicate':'Оценка уже сохранена','feedback_invalid':'Недействительная оценка'})
 LABELS.update({'inactivity':'Закрыто по неактивности','manual':'Завершено сотрудником'})
 LABELS.update({'normal':'Без ограничений полётов','cover':'При ограничениях полётов (КОВЁР)'})
+LABELS.update({'staff_action_required':'Нужно действие сотрудника','answer_not_helpful':'Готовый ответ не помог','unsafe_request':'Нужна помощь сотрудника по безопасности','out_of_scope':'Вопрос вне тематики','card_requires_staff':'Карточка требует участия сотрудника','bot_paused':'Автоответы отключены','rate_limited':'Сработал лимит сообщений','input_rejected':'Сообщение обработано защитой','message_rate':'Слишком частые сообщения','dialogue_backlog':'Много сообщений в ожидании','queue_capacity':'Очередь заполнена','message_size':'Слишком длинное сообщение','instruction_attempt':'Попытка изменить правила бота','user_ai_budget':'Лимит обработки пользователя','global_ai_budget':'Общий лимит обработки'})
 
 
 def create_app(config, database=None):
@@ -98,9 +101,12 @@ def create_app(config, database=None):
         common = dict(session=request.session, csrf=request.session.get('csrf'),
                       queue_count=db.one("SELECT count(*) n FROM tickets WHERE status='open'")['n'],
                       group_id=config.group_id, settings=db.settings(),
-                      endpoint=request.scope['route'].name,
+                      endpoint=request.scope['route'].name,now=time.time(),
                       flashes=request.session.pop('flashes', []), url_for=url_for)
-        return templates.TemplateResponse(request=request, name=name, context=common | context)
+        response=templates.TemplateResponse(request=request, name=name, context=common | context)
+        if context.get('fragment'):
+            response.headers['X-Dialogue-Fragment']='1'
+        return response
 
     async def protect(request: Request):
         request.session.setdefault('csrf', secrets.token_urlsafe(32))
@@ -346,6 +352,7 @@ def create_app(config, database=None):
 
     @router.api_route("/dialogue/{peer_id}",methods=["GET","POST"])
     def dialogue(request: Request, peer_id: int):
+        fragment=request.query_params.get('window')=='1'
         c=db.one("SELECT c.*,trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')) user_name FROM conversations c LEFT JOIN vk_profiles p ON p.user_id=c.user_id WHERE c.peer_id=?",(peer_id,))
         if not c:
             abort(404)
@@ -374,13 +381,16 @@ def create_app(config, database=None):
                     inbox.control(peer_id,int(request.state.form.get('outbox_id','0')),action)
                     flash(request, 'Повтор отправки запланирован.' if action=='retry' else 'Неотправленный ответ отменён.')
                 elif action=="resume":
-                    db.resume(peer_id)
+                    db.resume(peer_id,request.state.form.get('revision',''))
                     flash(request, "Управление возвращено боту. Он ответит на следующее новое сообщение.")
                 elif action=="take":
                     name=request.state.form.get("staff_name","").strip()[:80] or "Сотрудник"
                     request.session["staff_name"]=name
-                    db.execute("UPDATE tickets SET assigned_to=?,taken_at=? WHERE peer_id=? AND status IN ('open','waiting_user') AND assigned_to=''",(name,time.time(),peer_id))
-                    flash(request, "Состояние очереди обновлено.")
+                    db.take_dialogue(peer_id,name,request.state.form.get('revision',''))
+                    flash(request, "Диалог закреплен за вами. Автоматические ответы приостановлены.")
+                elif action in ('pause_bot','unpause_bot'):
+                    db.pause_bot(peer_id,action=='pause_bot',request.state.form.get('revision',''))
+                    flash(request,'Автоответы отключены на 24 часа. Вы можете отвечать вручную.' if action=='pause_bot' else 'Ограничение автоответов снято. Текущий режим диалога сохранен.')
                 elif action=="note":
                     db.execute("UPDATE tickets SET note=? WHERE peer_id=? AND status IN ('open','waiting_user')",(request.state.form.get("note","")[:2000],peer_id))
                     flash(request, "Заметка сохранена.")
@@ -393,15 +403,17 @@ def create_app(config, database=None):
                         abort(400)
                     db.pause_auto_close(peer_id,target_id,request.state.form.get('paused')=='1')
                     flash(request, 'Диалог оставлен у сотрудника без срока.' if request.state.form.get('paused')=='1' else 'Возврат боту по неактивности включен. Срок считается от последнего ответа сотрудника.')
-                return redirect(url_for("dialogue",peer_id=peer_id,ticket=ticket_id))
+                else:
+                    abort(400,'Неизвестное действие.')
+                return redirect(url_for("dialogue",peer_id=peer_id,ticket=ticket_id,window='1' if fragment else None))
             except ValueError as exc:
                 flash(request, str(exc),'error')
                 if action!='reply':
-                    return redirect(url_for('dialogue',peer_id=peer_id,ticket=ticket_id))
+                    return redirect(url_for('dialogue',peer_id=peer_id,ticket=ticket_id,window='1' if fragment else None))
         tickets=db.all("SELECT * FROM tickets WHERE peer_id=? AND status IN ('open','waiting_user') ORDER BY id DESC",(peer_id,))
         revision=inbox.revision(peer_id)
         topics=sorted({topic_label(row['topic']) for row in db.all("SELECT DISTINCT topic FROM cards WHERE topic!=''")})
-        return render(request, "dialogue.html",title=c['user_name'] or f"Диалог {peer_id}",conversation=c,tickets=tickets,messages=inbox.timeline(peer_id,limit=30),revision=revision,draft=draft,form_key=form_key,peer_id=peer_id,topics=topics,readonly=False)
+        return render(request, '_dialogue.html' if fragment else 'dialogue.html',fragment=fragment,title=c['user_name'] or f"Диалог {peer_id}",conversation=c,tickets=tickets,messages=inbox.timeline(peer_id,limit=30),revision=revision,draft=draft,form_key=form_key,peer_id=peer_id,topics=topics,readonly=False,bot_paused=c['bot_paused_until']>time.time(),protection_events=Protection(db).state(peer_id))
 
     @router.get('/dialogue/{peer_id}/updates')
     def dialogue_updates(request: Request, peer_id: int):
@@ -413,7 +425,7 @@ def create_app(config, database=None):
         if revision==request.query_params.get('revision'):
             return dict(revision=revision)
         active=db.one("SELECT status FROM tickets WHERE peer_id=? AND status IN ('open','waiting_user')",(peer_id,))
-        return dict(revision=revision,html=templates.get_template('_messages.html').render(messages=inbox.timeline(peer_id,limit=30),peer_id=peer_id,readonly=False,csrf=request.session['csrf'],group_id=config.group_id),status=label(active['status']) if active else 'У бота')
+        return dict(revision=revision,html=templates.get_template('_messages.html').render(messages=inbox.timeline(peer_id,limit=30),peer_id=peer_id,readonly=False,csrf=request.session['csrf'],group_id=config.group_id),status='Отвечает сотрудник' if c['human_mode'] else 'Автоответы отключены' if c['bot_paused_until']>time.time() else 'Отвечает бот')
 
     def selected_statistics_period(request):
         try:
@@ -540,11 +552,17 @@ def create_app(config, database=None):
                         raise ValueError("Сначала опубликуйте проверенные карточки.")
                     for card in selected:
                         card["rendered_answer"]=db.render_answer(card)
-                    decision=GigaChat(config).route(text,selected)
+                    ai=GigaChat(config)
+                    decision=ai.route(text,selected)
+                    if needs_full_catalog(decision) and len(selected)<len(candidates):
+                        for card in candidates:
+                            card['rendered_answer']=db.render_answer(card)
+                        selected=candidates
+                        decision=ai.route(text,selected)
                     if decision.get('kind')=='thanks':
                         decision['action']='acknowledge'
                     answer_card=next((c for c in selected if c['id']==decision.get('card_id')),None)
-                    if decision.get('kind')=='complaint' or answer_card and answer_card['action']=='handoff':
+                    if handoff_reason(decision,answer_card):
                         decision['action']='handoff'
             except (AIError,ValueError,RuntimeError) as exc:
                 flash(request, str(exc),"error")

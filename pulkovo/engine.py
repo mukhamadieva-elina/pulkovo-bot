@@ -6,6 +6,8 @@ from .consent import consent_configured, consent_message
 from .search import searcher
 from .dialogue_rules import is_thanks
 from .feedback import Feedback
+from .routing import STAFF_REASONS, handoff_reason, needs_full_catalog
+from .protection import Protection, instruction_attack, UNSAFE_TEXT, TOO_LONG_TEXT, AI_LIMIT_TEXT
 
 
 def keyboard(buttons):
@@ -30,7 +32,7 @@ class Engine:
         if self.db.one("SELECT id FROM requests WHERE event_key=?",(event_key,)):
             return None
         try:
-            control = json.loads(payload) if isinstance(payload,str) else payload or {}
+            control = json.loads(payload) if isinstance(payload,str) and len(payload)<=4096 else payload if isinstance(payload,dict) else {}
             if not isinstance(control,dict):
                 control = {}
         except (ValueError,TypeError):
@@ -40,14 +42,26 @@ class Engine:
             control = {"action":commands[text.strip().lower()]}
         if control.get("action") not in ("agree","decline","revoke","operator","feedback"):
             control = {}
+        elif control.get('action')=='agree':
+            control={'action':'agree','version':str(control.get('version',''))[:100]}
+        elif control.get('action')!='feedback':
+            control={'action':control['action']}
         if control.get('action') == 'feedback':
-            control={key:control.get(key) for key in ('action','token','rating')}
+            control={key:str(control.get(key,''))[:100] for key in ('action','token','rating')}
         if not control and not attachments and is_thanks(text):
             control={'local_intent':'thanks'}
-        self.db.enqueue(peer_id,user_id,event_key,text,attachments,json.dumps(control),vk_cmid=vk_cmid,vk_date=vk_date,is_feedback=control.get('action')=='feedback')
-        request = self.db.one("SELECT * FROM requests WHERE event_key=?",(event_key,))
         if control.get("action") in ("decline","revoke"):
-            self.db.record_consent(peer_id,user_id,"declined" if control["action"]=="decline" else "revoked",event_key)
+            state='declined' if control['action']=='decline' else 'revoked'
+            if self.db.conversation(peer_id,user_id)['consent_state']!=state:
+                self.db.record_consent(peer_id,user_id,state,event_key)
+        if len(text)>4096:
+            text=text[:4096]
+            if not control:
+                control={'input_too_long':True}
+        ident=self.db.enqueue(peer_id,user_id,event_key,text,attachments,json.dumps(control),vk_cmid=vk_cmid,vk_date=vk_date,is_feedback=control.get('action')=='feedback',protect=True)
+        if ident is None:
+            return None
+        request = self.db.one("SELECT * FROM requests WHERE id=?",(ident,))
         if control.get("action") in ("decline","operator"):
             self.db.handoff(request,"user_requested_operator")
         return request["id"]
@@ -92,6 +106,9 @@ class Engine:
         self.prepare(request,'thanks','Пожалуйста!',generation=generation,usage=usage)
 
     def process(self, request):
+        current=self.db.one('SELECT status FROM requests WHERE id=?',(request['id'],))
+        if not current or current['status'] not in ('pending','processing'):
+            return
         start = time.monotonic()
         peer = request["peer_id"]
         try:
@@ -116,11 +133,20 @@ class Engine:
                 message = "Согласие сохранено. Отправьте ваш вопрос или изображение.\n\nПри необходимости: /оператор — обратиться к сотруднику; /отозвать — прекратить обработку через ИИ."
                 if self.db.conversation(peer)["human_mode"]:
                     message = "Согласие сохранено. Ваш диалог остаётся у сотрудника до завершения обращения."
+                elif self.db.conversation(peer)['bot_paused_until']>time.time():
+                    message = 'Согласие сохранено. Автоматические ответы временно отключены. При необходимости напишите /оператор.'
                 self.prepare(request,"consent_accepted",message)
                 return
             conversation = self.db.conversation(peer)
             if conversation["human_mode"]:
                 self.prepare(request,"human_mode",reason="awaiting_operator")
+                return
+            if conversation['bot_paused_until']>time.time():
+                self.prepare(request,'bot_paused',reason='bot_paused')
+                return
+            protection=Protection(self.db)
+            if json.loads(request['payload'] or '{}').get('input_too_long'):
+                self.prepare(request,'input_rejected',TOO_LONG_TEXT if protection.notice(peer,'message_size') else None,reason='message_size')
                 return
             if json.loads(request['payload'] or '{}').get('local_intent')=='thanks':
                 self.thank(request,conversation['generation'])
@@ -134,12 +160,19 @@ class Engine:
             if not self.config.external_user_data:
                 self.to_human(request,"external_processing_not_enabled")
                 return
+            if instruction_attack(request['text']):
+                self.prepare(request,'input_rejected',UNSAFE_TEXT if protection.notice(peer,'instruction_attempt') else None,reason='instruction_attempt')
+                return
+            limit=protection.reserve_ai(peer)
+            if limit:
+                self.prepare(request,'rate_limited',AI_LIMIT_TEXT if protection.notice(peer,limit) else None,reason=limit)
+                return
             cards = self.db.cards(eligible=True)
             if not cards:
                 self.to_human(request,"no_published_cards")
                 return
             generation = conversation["generation"]
-            guard = lambda: self.db.allowed(peer,generation) and consent_configured(self.db.settings())
+            guard = lambda: self.db.allowed(peer,generation) and consent_configured(self.db.settings()) and self.db.one("SELECT 1 FROM requests WHERE id=? AND status IN ('pending','processing')",(request['id'],)) is not None
             descriptions, usage = [], {"prompt_tokens":0,"completion_tokens":0}
             attachments = json.loads(request["attachments"])
             if len(attachments) > 3 or any(a.get("type") != "photo" for a in attachments):
@@ -170,14 +203,14 @@ class Engine:
                 for card in candidates:
                     card["rendered_answer"] = self.db.render_answer(card)
                 decision = self.ai.route(request["text"],candidates,history,descriptions,guard)
-                if strategy != "full" and decision["action"] == "handoff" and decision["kind"] == "question" and len(candidates) < len(cards):
+                if strategy != "full" and needs_full_catalog(decision) and len(candidates) < len(cards):
                     for key in usage:
                         usage[key] += int(decision.get("usage",{}).get(key,0))
                     for card in cards:
                         card["rendered_answer"] = self.db.render_answer(card)
                     candidates = cards
                     decision = self.ai.route(request["text"],candidates,history,descriptions,guard)
-            if descriptions and decision['action']=='handoff' and decision['kind'] not in ('complaint','thanks') and decision.get('handoff_reason') not in ('complaint','operator_request','out_of_scope','unsafe') and conversation['clarification_count']<int(settings['max_clarifications']):
+            if descriptions and decision['action']=='handoff' and decision['kind']!='thanks' and decision.get('handoff_reason') not in STAFF_REASONS and conversation['clarification_count']<int(settings['max_clarifications']):
                 # Для фото сначала выясняем вопрос, если модель лишь не нашла ответ.
                 for key in usage:
                     usage[key] += int(decision.get("usage",{}).get(key,0))
@@ -189,8 +222,8 @@ class Engine:
             card = next((c for c in candidates if c["id"] == decision.get("card_id")),None)
             if decision['kind']=='thanks':
                 self.thank(request,generation,usage)
-            elif decision["kind"] == "complaint" or decision["action"] == "handoff" or card and card["action"] == "handoff":
-                self.to_human(request,"complaint" if decision["kind"]=="complaint" else "no_matching_answer",decision,usage,card)
+            elif reason := handoff_reason(decision,card):
+                self.to_human(request,reason,decision,usage,card)
             elif decision["action"] == "clarify":
                 if conversation["clarification_count"] >= int(settings["max_clarifications"]):
                     self.to_human(request,"clarification_limit",decision,usage)
@@ -227,6 +260,9 @@ class Engine:
                 return False
             request = dict(row)
             con.execute("UPDATE requests SET status='sending' WHERE id=?",(request["id"],))
+        if self.db.conversation(request['peer_id'])['bot_paused_until']>time.time() and request['outcome'] not in ('consent_revoked','consent_accepted','feedback','handoff'):
+            self.db.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='bot_paused' WHERE id=?",(request['id'],))
+            return True
         if request['outcome']=='thanks':
             current=self.db.conversation(request['peer_id'])
             if current['human_mode'] or current['generation']!=request['ai_generation']:

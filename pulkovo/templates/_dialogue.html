@@ -1,0 +1,42 @@
+{% macro hidden(action) %}<input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="action" value="{{action}}"><input type="hidden" name="revision" value="{{revision}}">{% endmacro %}
+{% set t=tickets[0] if tickets else none %}
+<section class="dialogue-shell" data-dialogue-root data-url="{{url_for('dialogue',peer_id=peer_id)}}">
+{% if fragment %}{% for category,message in flashes %}<div role="status" class="notice {{category}}">{{message}}</div>{% endfor %}{% endif %}
+<div class="dialogue-heading"><div><h2>{{conversation.user_name or 'Пользователь VK'}}</h2><p class="small muted">VK ID: {{conversation.user_id}} · <a href="https://vk.com/id{{conversation.user_id}}" target="_blank" rel="noopener noreferrer">Профиль ↗</a></p><span class="badge" data-active-status>{{'Отвечает сотрудник' if conversation.human_mode else 'Автоответы отключены' if bot_paused else 'Отвечает бот'}}</span></div><a class="button" href="https://vk.com/gim{{group_id}}?sel={{peer_id}}" target="_blank" rel="noopener noreferrer">Открыть в VK ↗</a></div>
+<div class="dialogue-layout"><section class="dialogue-chat" aria-label="Переписка и ответ">
+<div class="history-navigation"><span class="small muted">Последние 30 сообщений · новые внизу</span><button type="button" id="latest-messages" hidden>К последним сообщениям ↓</button></div>
+<div id="dialogue-history" role="region" aria-label="История переписки" tabindex="0" data-revision="{{revision}}" data-updates="{{url_for('dialogue_updates',peer_id=peer_id)}}">{% include '_messages.html' %}</div>
+<p id="dialogue-changed" class="notice" hidden>Диалог обновился. Прочитайте новые сообщения перед отправкой. <button type="button" data-refresh-dialogue>Обновить управление</button><span class="small">Введенный ответ сохранится.</span></p>
+<p class="notice error" data-dialogue-error role="alert" hidden></p>
+<form method="post" id="reply-form" class="reply-form">
+{{hidden('reply')}}<input type="hidden" name="client_key" value="{{form_key}}">
+<label>Ответ пассажиру<textarea name="reply" rows="3" required maxlength="3500" placeholder="Напишите ответ от имени сообщества…">{{draft}}</textarea></label>
+<div class="reply-footer"><details class="staff-identity"><summary>Сотрудник: {{session.staff_name or 'Сотрудник'}}</summary><label>Ваше имя<input name="staff_name" value="{{session.staff_name or 'Сотрудник'}}" required maxlength="80"></label><span class="small muted">Видно только коллегам.</span></details><button class="primary">Отправить ответ</button></div>
+<p class="small muted">После отправки отвечает сотрудник. Бот не вмешивается, пока вы не вернете ему диалог.</p>
+</form></section>
+<aside class="dialogue-controls" aria-label="Управление диалогом">
+<section class="control-section"><h3>Кто отвечает сейчас</h3>
+<span class="badge {{'warning' if conversation.human_mode else 'success'}}" data-active-status>{{'Отвечает сотрудник' if conversation.human_mode else 'Автоответы отключены' if bot_paused else 'Отвечает бот'}}</span>
+{% if t %}<p class="small status-explanation">{{'Пассажир ждет ответа сотрудника.' if t.status=='open' else 'Сотрудник ответил. Ждем новое сообщение пассажира.'}}</p>
+<p class="small muted">Ответственный: <strong>{{t.assigned_to or 'Не назначен'}}</strong></p>
+{% if not t.assigned_to %}<form method="post">{{hidden('take')}}<input type="hidden" name="staff_name" value="{{session.staff_name or 'Сотрудник'}}"><button data-mode-action>Взять диалог себе</button><p class="small muted">Коллеги увидят, что вы занимаетесь этим вопросом.</p></form>{% endif %}
+<div class="control-action"><h4>Закончили помощь?</h4><p class="small muted">Завершите работу сотрудника. Бот ответит на следующее новое сообщение. Сейчас пассажиру ничего не отправится.</p>
+<form method="post">{{hidden('resume')}}<button class="full" data-mode-action {{'disabled' if bot_paused else ''}}>Завершить и включить бота</button></form>
+{% if bot_paused %}<p class="small attention">Сначала снимите ограничение в разделе «Спам и ограничения».</p>{% endif %}</div>
+{% else %}<p class="small status-explanation">{{'Сообщения видны сотрудникам, автоматических ответов пока нет.' if bot_paused else 'Бот отвечает на вопросы по базе знаний. Если потребуется помощь, диалог появится в очереди.'}}</p>
+<form method="post">{{hidden('take')}}<input type="hidden" name="staff_name" value="{{session.staff_name or 'Сотрудник'}}"><button class="full" data-mode-action>Ответить вместо бота</button><p class="small muted">Приостановить бота и взять диалог себе. Сообщение пассажиру не отправляется.</p></form>{% endif %}
+</section>
+{% if t %}<details class="control-section"><summary>Тема и заметка сотрудника</summary><p class="small muted">{{t.reason|label}} · {{t.created_at|date}}</p>
+<form method="post">{{hidden('topic')}}<input type="hidden" name="ticket_id" value="{{t.id}}"><input type="hidden" name="topic_version" value="{{t.topic_version}}"><label>Тема<input name="topic" value="{{t.topic|topic_label}}" list="ticket-topics" required maxlength="250" placeholder="Выберите или введите тему"></label><button>Сохранить тему</button></form>
+<form method="post" class="ticket-note">{{hidden('note')}}<label>Внутренняя заметка<textarea name="note" rows="3" maxlength="2000" placeholder="Видна только сотрудникам">{{t.note}}</textarea></label><button>Сохранить заметку</button></form></details>
+<details class="control-section ticket-auto-close"><summary>Автоматический возврат боту</summary>
+{% if t.auto_close_paused %}<p class="small muted">Отключен. Диалог останется у сотрудника до ручного завершения.</p>{% elif settings.waiting_user_timeout_hours|int==0 %}<p class="small muted">Отключен в настройках. Диалог останется у сотрудника до ручного завершения.</p>{% elif t.status=='waiting_user' %}<p class="small muted">Через {{settings.waiting_user_timeout_hours}} ч после последнего ответа сотрудника, если пассажир не ответит. Закрытие отмечается как «По неактивности».</p>{% else %}<p class="small muted">Отсчет начнется после ответа сотрудника. Если пассажир не ответит за {{settings.waiting_user_timeout_hours}} ч, управление вернется боту.</p>{% endif %}
+<form method="post">{{hidden('auto_close')}}<input type="hidden" name="ticket_id" value="{{t.id}}"><input type="hidden" name="paused" value="{{'0' if t.auto_close_paused else '1'}}"><button>{{'Включить возврат по неактивности' if t.auto_close_paused else 'Отключить автоматический возврат'}}</button></form></details>{% endif %}
+<details class="control-section protection-controls" {{'open' if bot_paused else ''}}><summary>Спам и ограничения</summary>
+{% if bot_paused %}<p class="small attention">Автоответы и запросы к ИИ отключены до {{conversation.bot_paused_until|date}}.</p>{% else %}<p class="small muted">При спаме можно временно отключить автоответы этому пользователю. Сотрудник сможет отвечать вручную. Это не блокировка пользователя в VK.</p>{% endif %}
+<form method="post">{{hidden('unpause_bot' if bot_paused else 'pause_bot')}}<button data-mode-action>{{'Снять ограничение автоответов' if bot_paused else 'Отключить автоответы на 24 часа'}}</button></form>
+{% if protection_events %}<ul class="protection-events">{% for event in protection_events %}<li>{{event.reason|label}}: {{event.count}}<small>Последнее срабатывание: {{event.last_at|date}}</small></li>{% endfor %}</ul>{% endif %}
+<p class="small muted">Лимиты включаются автоматически при потоке сообщений. Срабатывание защиты само по себе не доказывает мошенничество.</p></details>
+<details class="control-section"><summary>Согласие и история</summary><p class="small muted">Согласие на ИИ: {{conversation.consent_state|label}}. При отказе можно общаться с сотрудником. Ответы сотрудников не передаются ИИ. Полная переписка доступна в VK.</p></details>
+</aside></div><datalist id="ticket-topics">{% for topic in topics %}<option value="{{topic}}">{% endfor %}</datalist>
+</section>

@@ -34,7 +34,8 @@ class OperatorInbox:
                 return self.revision(peer_id,connection)
         parts=[]
         for query in (
-            'SELECT human_mode,generation FROM conversations WHERE peer_id=?',
+            "SELECT human_mode,generation,bot_paused_until,bot_paused_until>CAST(strftime('%s','now') AS REAL) FROM conversations WHERE peer_id=?",
+            'SELECT reason,count,last_at FROM protection_events WHERE peer_id=? ORDER BY reason',
             'SELECT id,status,assigned_to,note,topic_version,auto_close_paused,closure_reason,last_staff_reply_at FROM tickets WHERE peer_id=? ORDER BY id',
             'SELECT p.updated_at FROM conversations c LEFT JOIN vk_profiles p ON p.user_id=c.user_id WHERE c.peer_id=?',
             'SELECT id,status,updated_at FROM requests WHERE peer_id=? ORDER BY id DESC LIMIT 100',

@@ -88,7 +88,7 @@ class SystemTests(unittest.TestCase):
     def test_migrations_idempotent(self):
         self.card()
         Database(self.path)
-        self.assertEqual(len(self.db.all("SELECT * FROM schema_migrations")),9)
+        self.assertEqual(len(self.db.all("SELECT * FROM schema_migrations")),11)
         self.assertEqual(len(self.db.cards()),1)
 
     def test_upgrade_preserves_data_and_backs_up(self):
@@ -273,20 +273,17 @@ class SystemTests(unittest.TestCase):
         self.assertEqual(self.engine.claim()["peer_id"],12)
         self.assertIsNone(self.engine.claim())
 
-    def test_complaint_goes_to_queue_even_with_answer_id(self):
+    def test_complaint_with_applicable_answer_does_not_force_staff(self):
         self.accept()
         ident=self.card()
         self.ai.decision=dict(action="answer",card_id=ident,kind="complaint",tone="neutral",intent="",topic="Парковка")
-        row=self.message("Списали деньги дважды")
-        self.assertEqual(row["outcome"],"handoff")
-        self.assertEqual(len(self.db.all("SELECT * FROM tickets")),1)
-        self.assertTrue(self.db.conversation(11)["human_mode"])
+        row=self.message("Не могу понять, где оплатить парковку!")
+        self.assertEqual(row["outcome"],"answer")
+        self.assertEqual(len(self.db.all("SELECT * FROM tickets")),0)
+        self.assertFalse(self.db.conversation(11)["human_mode"])
         transport=Transport()
         self.engine.deliver(transport)
-        self.assertEqual(transport.marked,[11])
-        followup=self.message("Дополнительные подробности")
-        self.assertEqual(followup["outcome"],"human_mode")
-        self.assertEqual(followup["text"],"Дополнительные подробности")
+        self.assertEqual(transport.marked,[])
         self.assertEqual(self.ai.calls,1)
 
     def test_operator_request_cancels_prepared_ai_answer(self):
@@ -644,9 +641,11 @@ class SystemTests(unittest.TestCase):
         client=authenticated_client(self.cfg,self.db)
         page=client.get("/queue")
         self.assertIn(b"gim123?sel=11",page.content)
-        client.post("/dialogue/11",data={"csrf":"test","action":"take","staff_name":"Тест"})
+        from pulkovo.operator import OperatorInbox
+        revision=OperatorInbox(self.db).revision(11)
+        client.post("/dialogue/11",data={"csrf":"test","action":"take","staff_name":"Тест","revision":revision})
         self.assertEqual(self.db.all("SELECT * FROM tickets")[0]["assigned_to"],"Тест")
-        client.post("/dialogue/11",data={"csrf":"test","action":"resume"})
+        client.post("/dialogue/11",data={"csrf":"test","action":"resume","revision":OperatorInbox(self.db).revision(11)})
         self.assertFalse(self.db.conversation(11)["human_mode"])
 
     def test_render_escapes_user_text(self):
@@ -660,7 +659,7 @@ class SystemTests(unittest.TestCase):
     def test_ai_validates_card_id(self):
         ai=GigaChat(self.cfg)
         bad={"action":"answer","card_id":999,"question":"","kind":"question","tone":"neutral"}
-        with patch.object(ai,"call",side_effect=[[{"tokens":10},{"tokens":30}],{"choices":[{"message":{"content":json.dumps(bad)}}]}]):
+        with patch.object(ai,"call",side_effect=[[{"tokens":10},{"tokens":30}],{"choices":[{"message":{"content":json.dumps(bad)}}]},{"choices":[{"message":{"content":json.dumps(bad)}}]}]):
             with self.assertRaises(AIError):
                 ai.route("q",[{"id":1,"topic":"Тема","title":"Вопрос","rendered_answer":"Ответ","conditions":""}])
 

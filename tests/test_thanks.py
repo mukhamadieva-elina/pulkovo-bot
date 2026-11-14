@@ -70,9 +70,9 @@ class ThanksTests(unittest.TestCase):
         self.assertEqual(row['outcome'],'answer')
         self.assertEqual(self.ai.route.call_args.args[0],'Спасибо, а где парковка?')
         self.engine.deliver(self.transport)
-        self.ai.route.return_value=dict(action='handoff',card_id=None,kind='complaint',tone='negative')
+        self.ai.route.return_value=dict(action='handoff',card_id=None,kind='complaint',tone='negative',handoff_reason='unresolved')
         row=self.process('Спасибо, но это не помогло')
-        self.assertEqual((row['outcome'],row['reason']),('handoff','complaint'))
+        self.assertEqual((row['outcome'],row['reason']),('handoff','answer_not_helpful'))
 
     def test_bot_does_not_interrupt_staff_on_thanks(self):
         row=self.process('/оператор');self.engine.deliver(self.transport)
@@ -128,7 +128,7 @@ class ThanksTests(unittest.TestCase):
         for kind,valid in [('thanks',True),('question',False)]:
             decision['kind']=kind
             payload={'choices':[{'message':{'content':json.dumps(decision)}}]}
-            with patch.object(ai,'call',side_effect=[[{'tokens':10}],payload]):
+            with patch.object(ai,'call',side_effect=[[{'tokens':10}],payload,payload]):
                 if valid:self.assertEqual(ai.route('От души',[])['action'],'acknowledge')
                 else:
                     with self.assertRaises(AIError):ai.route('От души',[])

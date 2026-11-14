@@ -65,7 +65,7 @@ class Feedback:
             cancel_pending(con, peer, 'new_answer')
             state = con.execute('SELECT * FROM conversations WHERE peer_id=?', (peer,)).fetchone()
             enabled = con.execute("SELECT value FROM settings WHERE key='feedback_enabled'").fetchone()
-            if not enabled or enabled[0] != 'true' or state['human_mode'] or state['generation'] != request['ai_generation']:
+            if not enabled or enabled[0] != 'true' or state['human_mode'] or state['bot_paused_until']>now or state['generation'] != request['ai_generation']:
                 return
             random_id = message_random_id(con)
             latest = con.execute("""SELECT max(id) FROM requests WHERE peer_id=? AND coalesce(json_extract(
@@ -94,7 +94,7 @@ class Feedback:
     def _eligible(self, con, survey, now):
         state = con.execute('SELECT * FROM conversations WHERE peer_id=?', (survey['peer_id'],)).fetchone()
         settings = dict(con.execute('SELECT key,value FROM settings'))
-        if (settings.get('feedback_enabled') != 'true' or settings.get('consent_ready') != 'true' or not state or state['human_mode']
+        if (settings.get('feedback_enabled') != 'true' or settings.get('consent_ready') != 'true' or not state or state['human_mode'] or state['bot_paused_until']>now
                 or state['generation'] != survey['generation'] or state['clarification_count']
                 or state['consent_state'] != 'accepted' or state['consent_version'] != settings['consent_version']):
             return 'dialogue_changed'

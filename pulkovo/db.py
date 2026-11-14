@@ -8,6 +8,7 @@ from pathlib import Path
 from .migrations import migrate
 from .resources import bind_answer
 from .feedback import cancel_pending, record_activity, message_random_id
+from .protection import admit, LIMIT_TEXT
 
 
 DEFAULT_SETTINGS = {
@@ -116,7 +117,7 @@ class Database:
 
     def dialogue_rows(self, state='all', limit=None):
         rows=self.all("""SELECT * FROM (
-            SELECT c.peer_id,c.user_id,t.id,t.request_id,t.topic_source,t.topic_request_id,
+            SELECT c.peer_id,c.user_id,c.bot_paused_until,t.id,t.request_id,t.topic_source,t.topic_request_id,
             CASE WHEN c.human_mode=0 THEN 'bot' WHEN t.status='waiting_user' THEN 'waiting_user' ELSE 'open' END status,
             CASE WHEN c.human_mode=1 THEN coalesce(t.topic,'') WHEN q.id>t.request_id THEN q.topic ELSE coalesce(nullif(t.topic,''),q.topic,'') END topic,
             CASE WHEN c.human_mode=1 THEN coalesce(t.reason,'') ELSE '' END reason,
@@ -199,9 +200,9 @@ class Database:
 
     def allowed(self, peer_id, generation=None):
         c = self.conversation(peer_id)
-        return c["consent_state"] == "accepted" and c["consent_version"] == self.setting("consent_version") and not c["human_mode"] and (generation is None or c["generation"] == generation)
+        return c["consent_state"] == "accepted" and c["consent_version"] == self.setting("consent_version") and not c["human_mode"] and c['bot_paused_until'] <= time.time() and (generation is None or c["generation"] == generation)
 
-    def enqueue(self, peer_id, user_id, event_key, text="", attachments=None, payload="", *, vk_cmid=0, vk_date=0, is_feedback=False):
+    def enqueue(self, peer_id, user_id, event_key, text="", attachments=None, payload="", *, vk_cmid=0, vk_date=0, is_feedback=False, protect=False):
         c = self.conversation(peer_id, user_id)
         # Переписка с сотрудником хранится для админки независимо от согласия на ИИ.
         # Передача в ИИ отдельно ограничена allowed() и human_mode.
@@ -209,7 +210,16 @@ class Database:
         attachments = attachments or []
         with self.connect() as con:
             con.execute('BEGIN IMMEDIATE')
+            if con.execute('SELECT 1 FROM requests WHERE event_key=?',(event_key,)).fetchone():
+                return None
+            limited,notice = admit(con,peer_id,json.loads(payload or '{}'),c['human_mode'],time.time()) if protect else ('',False)
+            if limited:
+                cancel_pending(con,peer_id,'rate_limited')
+            if limited and not notice:
+                return None
             cur = con.execute("INSERT OR IGNORE INTO requests(event_key,peer_id,user_id,text,attachments,input_type,payload,random_id,created_at,updated_at,vk_cmid,vk_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, peer_id, user_id, text if permitted else "", json.dumps(attachments) if permitted else "[]", "mixed" if text and attachments else "image" if attachments else "text", payload, message_random_id(con), time.time(), time.time(), vk_cmid, vk_date))
+            if limited:
+                con.execute("UPDATE requests SET status='ready',outcome='rate_limited',reason=?,reply=?,keyboard=? WHERE id=?",(limited,LIMIT_TEXT,json.dumps({'one_time':True,'buttons':[]}),cur.lastrowid))
             if cur.rowcount and not is_feedback:
                 con.execute("UPDATE tickets SET status='open' WHERE peer_id=? AND status='waiting_user'", (peer_id,))
                 record_activity(con,peer_id,cur.lastrowid,time.time())
@@ -265,13 +275,54 @@ class Database:
             con.execute("INSERT OR IGNORE INTO tickets(peer_id,request_id,reason,created_at) VALUES (?,?,?,?)", (request["peer_id"], request["id"], reason, time.time()))
             self._refresh_ticket_topics(con,request['peer_id'])
 
-    def resume(self, peer_id):
+    def _check_dialogue_revision(self, con, peer_id, expected_revision):
+        if expected_revision is not None:
+            from .operator import OperatorInbox
+            if OperatorInbox(self).revision(peer_id,con)!=expected_revision:
+                raise ValueError('Диалог изменился. Проверьте новые сообщения и повторите действие.')
+
+    def take_dialogue(self, peer_id, name, expected_revision):
         with self.connect() as con:
             con.execute('BEGIN IMMEDIATE')
+            self._check_dialogue_revision(con,peer_id,expected_revision)
+            latest=con.execute('SELECT id FROM requests WHERE peer_id=? ORDER BY id DESC LIMIT 1',(peer_id,)).fetchone()
+            if not latest:
+                raise ValueError('В диалоге пока нет сообщений.')
+            now=time.time()
+            con.execute("INSERT OR IGNORE INTO tickets(peer_id,request_id,reason,status,created_at) VALUES (?,?,'staff_joined','open',?)",(peer_id,latest['id'],now))
+            con.execute("UPDATE tickets SET assigned_to=?,taken_at=? WHERE peer_id=? AND status IN ('open','waiting_user')",(name,now,peer_id))
+            con.execute('UPDATE conversations SET human_mode=1,generation=generation+1,updated_at=? WHERE peer_id=?',(now,peer_id))
+            con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='staff_joined' WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks')",(peer_id,))
+            cancel_pending(con,peer_id,'staff_joined')
+            self._refresh_ticket_topics(con,peer_id)
+            con.execute("INSERT INTO audit(action,target,created_at) VALUES ('take_dialogue',?,?)",(str(peer_id),now))
+
+    def pause_bot(self, peer_id, paused, expected_revision):
+        with self.connect() as con:
+            con.execute('BEGIN IMMEDIATE')
+            self._check_dialogue_revision(con,peer_id,expected_revision)
+            now=time.time()
+            con.execute('UPDATE conversations SET bot_paused_until=?,generation=generation+1,updated_at=? WHERE peer_id=?',(now+86400 if paused else 0,now,peer_id))
+            if paused:
+                con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='bot_paused' WHERE peer_id=? AND status='ready' AND outcome NOT IN ('consent_revoked','consent_accepted','feedback')",(peer_id,))
+            cancel_pending(con,peer_id,'bot_paused')
+            con.execute('INSERT INTO audit(action,target,created_at) VALUES (?,?,?)',('pause_bot' if paused else 'unpause_bot',str(peer_id),now))
+
+    def resume(self, peer_id, expected_revision=None):
+        with self.connect() as con:
+            con.execute('BEGIN IMMEDIATE')
+            self._check_dialogue_revision(con,peer_id,expected_revision)
+            c=con.execute('SELECT bot_paused_until FROM conversations WHERE peer_id=?',(peer_id,)).fetchone()
+            if c and c['bot_paused_until']>time.time():
+                raise ValueError('Сначала снимите ограничение автоответов в разделе «Спам и ограничения».')
             if con.execute("SELECT 1 FROM operator_outbox WHERE peer_id=? AND status IN ('pending','sending','failed')",(peer_id,)).fetchone():
                 raise ValueError('Сначала дождитесь отправки ответа или отмените неотправленный ответ.')
             self._refresh_ticket_topics(con,peer_id)
             con.execute("UPDATE conversations SET human_mode=0,generation=generation+1,clarification_count=0,updated_at=? WHERE peer_id=?", (time.time(), peer_id))
+            con.execute("""UPDATE requests SET status='done',outcome='human_mode',reason='closed_by_staff',reply=NULL,updated_at=?
+                WHERE peer_id=? AND status IN ('pending','processing')
+                AND coalesce(json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,'$.action'),'') NOT IN ('agree','revoke','feedback')""",(time.time(),peer_id))
+            con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='closed_by_staff' WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','rate_limited','input_rejected')",(peer_id,))
             cancel_pending(con,peer_id,'returned_to_bot')
             con.execute("UPDATE tickets SET status='closed',closed_at=?,closure_reason='manual' WHERE peer_id=? AND status IN ('open','waiting_user')", (time.time(), peer_id))
             con.execute("INSERT INTO audit(action,target,created_at) VALUES ('resume_bot',?,?)", (str(peer_id), time.time()))
@@ -298,8 +349,9 @@ class Database:
                 return False
             ticket=con.execute("""SELECT * FROM tickets t WHERE id=? AND status='waiting_user'
                 AND auto_close_paused=0 AND last_staff_reply_at IS NOT NULL AND last_staff_reply_at<=?
+                AND NOT EXISTS (SELECT 1 FROM conversations c WHERE c.peer_id=t.peer_id AND c.bot_paused_until>?)
                 AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.peer_id=t.peer_id AND r.status IN ('pending','processing','ready','sending'))
-                AND NOT EXISTS (SELECT 1 FROM operator_outbox o WHERE o.peer_id=t.peer_id AND o.status IN ('pending','sending','failed'))""",(ticket_id,now-hours*3600)).fetchone()
+                AND NOT EXISTS (SELECT 1 FROM operator_outbox o WHERE o.peer_id=t.peer_id AND o.status IN ('pending','sending','failed'))""",(ticket_id,now-hours*3600,now)).fetchone()
             if not ticket:
                 return False
             self._refresh_ticket_topics(con,ticket['peer_id'])
@@ -319,7 +371,7 @@ class Database:
 
     def history(self, peer_id, limit=4):
         generation = self.conversation(peer_id)["generation"]
-        rows=list(reversed(self.all("SELECT text,reply,image_descriptions FROM requests WHERE peer_id=? AND status='sent' AND ai_generation=? AND outcome='clarify' AND id>coalesce((SELECT max(id) FROM requests WHERE peer_id=? AND outcome IN ('answer','thanks') AND status='sent'),0) ORDER BY id DESC LIMIT ?", (peer_id, generation, peer_id, limit))))
+        rows=list(reversed(self.all("SELECT text,reply,image_descriptions FROM requests WHERE peer_id=? AND status='sent' AND ai_generation=? AND outcome IN ('answer','clarify') AND updated_at>=? AND id>coalesce((SELECT max(id) FROM requests WHERE peer_id=? AND outcome='thanks' AND status='sent'),0) ORDER BY id DESC LIMIT ?", (peer_id, generation,time.time()-1800, peer_id, limit))))
         for row in rows:
             images=json.loads(row.pop('image_descriptions'))
             if images:
@@ -331,6 +383,8 @@ class Database:
         self.execute("UPDATE requests SET text='',attachments='[]',reply=NULL,image_descriptions='[]' WHERE created_at<? AND status NOT IN ('pending','processing','ready','sending')", (cutoff,))
         self.execute("UPDATE staff_replies SET text='',attachments='[]' WHERE created_at<?",(cutoff,))
         self.execute("UPDATE operator_outbox SET text='' WHERE created_at<? AND status IN ('sent','cancelled')",(cutoff,))
+        self.execute('DELETE FROM protection_buckets WHERE updated_at<?',(cutoff,))
+        self.execute('DELETE FROM protection_events WHERE last_at<?',(cutoff,))
 
     def backup(self, target):
         destination = sqlite3.connect(target)

@@ -74,7 +74,7 @@ def inspect_simple_sheet(sheet, filename):
             issues.append('Слишком краткий ответ: проверьте область применения.')
         if re.search(r'\[имя\]|\(ссылка\)|\b[ХхXx]{2}\b|https?:\s+//|замените этот', answer, re.I):
             issues.append('В ответе остались незаполненные подстановки.')
-        cards.append(dict(topic=topic,title=title,answer=answer,question_variants=[v.strip() for v in data.get('другие формулировки','').splitlines() if v.strip()],conditions=data.get('условия',''),mode='any',action='handoff' if topic.casefold()=='жалобы' else 'answer',visibility='public',status='draft',reviewed=0,issues=issues,source=f'{filename} · База знаний · строка {number}',source_key=key))
+        cards.append(dict(topic=topic,title=title,answer=answer,question_variants=[v.strip() for v in data.get('другие формулировки','').splitlines() if v.strip()],conditions=data.get('условия',''),mode='any',action='answer',visibility='public',status='draft',reviewed=0,issues=issues,source=f'{filename} · База знаний · строка {number}',source_key=key))
     if not cards:
         raise ValueError('В файле нет вопросов. Заполните строки под заголовком шаблона.')
     return cards
@@ -133,7 +133,7 @@ def inspect_workbook(raw, filename):
                 if not b:
                     continue
                 title, answer, topic = b, c, parent + (" / " + sub if sub else "")
-                action = "handoff" if parent == "Жалобы" else "answer"
+                action = "answer"
             elif sheet.title == "КОВЕР ответы":
                 if not a:
                     continue

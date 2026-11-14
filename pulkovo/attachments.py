@@ -12,7 +12,7 @@ ATTACHMENT_LABELS={
 
 
 def safe_image_url(url):
-    if not isinstance(url,str):
+    if not isinstance(url,str) or len(url)>8192 or any(ord(c)<32 for c in url):
         return ''
     try:
         parsed=urlparse(url)
@@ -26,10 +26,18 @@ def safe_image_url(url):
 
 def normalize_attachments(items):
     attachments=[]
+    if not isinstance(items,list):
+        return attachments
     for item in items[:20]:
+        if not isinstance(item,dict):
+            continue
         kind=item.get('type','attachment')
+        if not isinstance(kind,str):
+            kind='attachment'
         attachment={'type':kind}
         data=item.get(kind,{})
+        if not isinstance(data,dict):
+            data={}
         images=[]
         if kind=='photo':
             images=data.get('sizes',[])
@@ -37,7 +45,7 @@ def normalize_attachments(items):
             images=data.get('images') or data.get('images_with_background',[])
             if isinstance(data.get('sticker_id'),int):
                 attachment['sticker_id']=data['sticker_id']
-        images=[image for image in images if safe_image_url(image.get('url'))]
+        images=[image for image in images if isinstance(image,dict) and safe_image_url(image.get('url')) and isinstance(image.get('width',0),(int,float)) and isinstance(image.get('height',0),(int,float))] if isinstance(images,list) else []
         if images:
             # Для стикера достаточно компактного статического изображения.
             suitable=[image for image in images if image.get('width',0)>=256] if kind=='sticker' else []
