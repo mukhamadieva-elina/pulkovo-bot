@@ -5,6 +5,7 @@ import json
 import re
 import time
 from .feedback import cancel_pending, message_random_id
+from .sessions import ensure_session, CLOSURE_LABELS
 
 
 def control_label(payload):
@@ -16,6 +17,8 @@ def control_label(payload):
         return ''
     if data['action']=='feedback':
         return 'Оценка «Хорошо»' if data.get('rating')=='good' else 'Оценка «Плохо»' if data.get('rating')=='bad' else 'Оценка помощи бота'
+    if data['action']=='agree' and data.get('source')=='text':
+        return 'Согласие отправлено текстом'
     return {
         'agree':'Выбрано «Согласен»',
         'decline':'Выбрано «Без ИИ — к сотруднику»',
@@ -42,6 +45,7 @@ class OperatorInbox:
             'SELECT id,updated_at FROM staff_replies WHERE peer_id=? ORDER BY id DESC LIMIT 100',
             'SELECT id,status,updated_at FROM operator_outbox WHERE peer_id=? ORDER BY id DESC LIMIT 100',
             'SELECT id,status,rating,updated_at FROM feedback_surveys WHERE peer_id=? ORDER BY id DESC LIMIT 100',
+            'SELECT id,last_activity_at,closed_at,closure_reason FROM dialogue_sessions WHERE peer_id=? ORDER BY id DESC LIMIT 100',
         ):
             parts.append([tuple(row) for row in con.execute(query,(peer_id,))])
         return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
@@ -68,13 +72,14 @@ class OperatorInbox:
             if con.execute("SELECT 1 FROM operator_outbox WHERE peer_id=? AND status IN ('pending','sending','failed')",(peer_id,)).fetchone():
                 raise ValueError('Предыдущий ответ ещё не отправлен. Дождитесь отправки или отмените его.')
             now=time.time()
+            ensure_session(con,peer_id,now)
             con.execute("INSERT OR IGNORE INTO tickets(peer_id,request_id,reason,status,created_at) VALUES (?,?,'staff_joined','open',?)",(peer_id,latest['id'],now))
             ticket=con.execute("SELECT * FROM tickets WHERE peer_id=? AND status IN ('open','waiting_user')",(peer_id,)).fetchone()
             self.db._refresh_ticket_topics(con,peer_id)
             con.execute("UPDATE tickets SET assigned_to=CASE WHEN assigned_to='' THEN ? ELSE assigned_to END,taken_at=coalesce(taken_at,?) WHERE id=?",(name,now,ticket['id']))
             con.execute('UPDATE conversations SET human_mode=1,generation=generation+1,updated_at=? WHERE peer_id=?',(now,peer_id))
             cancel_pending(con,peer_id,'staff_joined')
-            con.execute("UPDATE requests SET status='cancelled',reason='staff_joined',reply=NULL WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks')",(peer_id,))
+            con.execute("UPDATE requests SET status='cancelled',reason='staff_joined',reply=NULL WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','flight_info')",(peer_id,))
             random_id=message_random_id(con)
             row=con.execute('INSERT INTO operator_outbox(client_key,peer_id,ticket_id,basis_request_id,text,staff_name,random_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',(client_key,peer_id,ticket['id'],latest['id'],text,name,random_id,now,now))
             con.execute("INSERT INTO audit(action,target,created_at) VALUES ('operator_reply_queued',?,?)",(str(row.lastrowid),now))
@@ -144,7 +149,7 @@ class OperatorInbox:
             # При повторе random_id прежний: VK не создаст второе сообщение.
             con.execute('UPDATE operator_outbox SET status=?,attempts=0,error=\'\',updated_at=? WHERE id=?',(status,time.time(),ident))
 
-    def timeline(self, peer_id, ticket_id=None, *, limit=150):
+    def timeline(self, peer_id, ticket_id=None, *, limit=150, include_sessions=False):
         result=[]
         bounds=''
         params=(peer_id,)
@@ -173,4 +178,17 @@ class OperatorInbox:
         survey_bounds=' AND sent_at>? AND sent_at<=?' if ticket_id is not None else ''
         for row in self.db.all("SELECT * FROM feedback_surveys WHERE peer_id=? AND sent_at IS NOT NULL"+survey_bounds+' ORDER BY sent_at DESC LIMIT 30',params):
             result.append(dict(id=f"survey-{row['id']}",author='Бот',kind='bot',text=row['text']+'\nХорошо · Плохо',attachments=[],created_at=row['sent_at'],status='sent',cmid=0))
-        return sorted(result,key=lambda m:(m['created_at'],m['cmid']))[-limit:]
+        visible=sorted(result,key=lambda m:(m['created_at'],m['cmid']))[-limit:]
+        if not visible or ticket_id is not None or not include_sessions:
+            return visible
+        first=visible[0]['created_at']
+        for session in self.db.all('SELECT * FROM dialogue_sessions WHERE peer_id=? AND (closed_at IS NULL OR closed_at>=?) ORDER BY id DESC LIMIT 100',(peer_id,first)):
+            # Keep the heading when the start of a long session is outside the last 30 messages.
+            # VK timestamps are rounded down to seconds; put the boundary before the first input.
+            start=int(session['started_at'])
+            visible.append(dict(id=f"session-start-{session['id']}",kind='boundary',created_at=max(start,first),cmid=-1,
+                text=f"Сессия № {session['id']}"+(' · продолжение' if session['started_at']<first else ' · начало'),boundary_at=session['started_at']))
+            if session['closed_at'] is not None:
+                visible.append(dict(id=f"session-end-{session['id']}",kind='boundary',created_at=session['closed_at'],cmid=10**12,
+                    text=f"Сессия № {session['id']} завершена · {CLOSURE_LABELS[session['closure_reason']]}",boundary_at=session['closed_at']))
+        return sorted(visible,key=lambda m:(m['created_at'],m['cmid']))

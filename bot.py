@@ -20,6 +20,7 @@ from pulkovo.operator import OperatorInbox
 from pulkovo.attachments import normalize_attachments
 from pulkovo.profiles import ProfileSync
 from pulkovo.feedback import Feedback
+from pulkovo.sessions import expire_sessions
 
 
 class VKSession(requests.Session):
@@ -131,6 +132,7 @@ def main():
         transport=VKTransport(config)
         while not stop.is_set():
             try:
+                expire_sessions(db)
                 if feedback.deliver(transport,ingress):
                     continue
             except Exception:

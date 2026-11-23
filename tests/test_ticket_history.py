@@ -86,7 +86,7 @@ class TicketHistoryTests(unittest.TestCase):
         page=self.client.get('/dialogue/11').text
         update=self.client.get('/dialogue/11/updates').json()['html']
         for html in (page,update):
-            self.assertEqual(html.count('data-message-id='),30)
+            self.assertEqual(html.count('<article class="message '),30)
             self.assertNotIn('Уникальное сообщение [19]',html)
             self.assertIn('Уникальное сообщение [20]',html)
             self.assertIn('Уникальное сообщение [49]',html)

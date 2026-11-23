@@ -20,6 +20,7 @@ from pulkovo.db import Database
 from pulkovo.engine import Engine
 from pulkovo.importer import import_workbook, inspect_workbook, template_workbook
 from pulkovo.migrations import migrate
+from pulkovo.consent import consent_message
 from pulkovo.web import create_app
 from fastapi.testclient import TestClient
 from web_client import authenticated_client
@@ -88,7 +89,7 @@ class SystemTests(unittest.TestCase):
     def test_migrations_idempotent(self):
         self.card()
         Database(self.path)
-        self.assertEqual(len(self.db.all("SELECT * FROM schema_migrations")),11)
+        self.assertEqual(len(self.db.all("SELECT * FROM schema_migrations")),13)
         self.assertEqual(len(self.db.cards()),1)
 
     def test_upgrade_preserves_data_and_backs_up(self):
@@ -193,7 +194,7 @@ class SystemTests(unittest.TestCase):
         self.card()
         first=self.message('Как оплатить парковку?')
         self.assertEqual(first['outcome'],'consent_required')
-        self.assertEqual(first['reply'],self.db.setting('consent_text'))
+        self.assertEqual(first['reply'],consent_message(self.db.settings()))
         self.assertEqual(self.ai.calls,0)
         self.engine.deliver(Transport())
         accepted=self.message('Согласен',payload={'action':'agree','version':'v1'})
@@ -201,7 +202,7 @@ class SystemTests(unittest.TestCase):
         self.assertEqual(self.ai.calls,0)
         event=self.db.one('SELECT * FROM consent_events')
         self.assertEqual(event['document_url'],'')
-        self.assertEqual(event['text_snapshot'],self.db.setting('consent_text'))
+        self.assertEqual(event['text_snapshot'],first['reply'])
         self.engine.deliver(Transport())
         answer=self.message('Как оплатить парковку?')
         self.assertEqual(answer['outcome'],'answer')

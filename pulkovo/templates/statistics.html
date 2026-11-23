@@ -16,6 +16,7 @@
 <div class="metric"><span>Потребовался сотрудник</span><strong>{{automation.handed_off}}</strong><small>Передан вопрос или сотрудник подключился сам</small></div>
 </div>
 {% include '_feedback_statistics.html' %}
+<section class="panel"><h2>Завершенные сессии</h2><p class="small muted">По дате завершения за выбранный период. Сессия объединяет сообщения одной консультации. Учет начинается после обновления бота; старая переписка не разделяется задним числом. Закрытие и оценка сами по себе не подтверждают решение вопроса.</p><div class="metrics"><div class="metric"><span>После оценки</span><strong>{{session_closures.rating or 0}}</strong></div><div class="metric"><span>По неактивности</span><strong>{{session_closures.inactivity or 0}}</strong></div><div class="metric"><span>Завершено сотрудником</span><strong>{{session_closures.manual or 0}}</strong></div></div></section>
 <section class="panel statistics-daily">
 <div class="section-head"><h2>Автоматизация по дням</h2><a class="button" href="/automation.csv?{{period.query}}">Скачать CSV</a></div>
 <p class="small muted">Для каждого дня: доля ответов бота и число результатов. Прочерк означает, что результатов пока нет. Общий процент за период учитывает количество результатов каждого дня.</p>

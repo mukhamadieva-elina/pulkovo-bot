@@ -23,11 +23,12 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from .ai import AIError, GigaChat
 from .db import Database
-from .dialogue_rules import is_thanks
+from .dialogue_rules import GREETING_TEXT, THANKS_TEXT, is_greeting, is_thanks
 from .consent import consent_message, valid_consent_url
 from .importer import import_workbook, inspect_workbook, template_workbook
 from .search import searcher
 from .resources import display_answer, resource_keys, answer_parts
+from .flights import parse_query, answer_query
 from .topics import topic_label
 from .operator import OperatorInbox
 from .statistics import MOSCOW, PERIODS, automation_report, feedback_report, statistics_period
@@ -35,16 +36,18 @@ from .attachments import safe_image_url, IMAGE_DOMAINS, ATTACHMENT_LABELS
 from .routing import handoff_reason, needs_full_catalog
 from .protection import Protection
 
-LABELS = {"answer":"Готовый ответ","clarify":"Уточнение ИИ","handoff":"Передано сотруднику","human_mode":"Ожидает сотрудника","consent_required":"Ожидает согласия","consent_accepted":"Согласие получено","consent_revoked":"Согласие отозвано","pending":"В очереди","processing":"Обработка","ready":"К отправке","sending":"Отправка","sent":"Отправлено","failed":"Ошибка отправки","cancelled":"Отменено","done":"Обработано","draft":"Черновик","published":"Опубликована","disabled":"Отключена","public":"Публичная","internal":"Для сотрудников","any":"Всегда","normal":"Обычный режим","cover":"КОВЁР","open":"Ожидает","closed":"Закрыто","complaint":"Жалоба","no_matching_answer":"Ответ не найден","user_requested_operator":"Запрос сотрудника","consent_declined":"Отказ от ИИ","consent_not_configured":"Согласие ещё не настроено","external_processing_not_enabled":"Передача в ИИ выключена","no_published_cards":"Нет опубликованных ответов","processing_error":"Ошибка обработки","clarification_limit":"Лимит уточнений","unsupported_attachment":"Неподдерживаемое вложение"}
+LABELS = {"answer":"Готовый ответ","clarify":"Уточнение","handoff":"Передано сотруднику","human_mode":"Ожидает сотрудника","consent_required":"Ожидает согласия","consent_accepted":"Согласие получено","consent_revoked":"Согласие отозвано","pending":"В очереди","processing":"Обработка","ready":"К отправке","sending":"Отправка","sent":"Отправлено","failed":"Ошибка отправки","cancelled":"Отменено","done":"Обработано","draft":"Черновик","published":"Опубликована","disabled":"Отключена","public":"Публичная","internal":"Для сотрудников","any":"Всегда","normal":"Обычный режим","cover":"КОВЁР","open":"Ожидает","closed":"Закрыто","complaint":"Жалоба","no_matching_answer":"Ответ не найден","user_requested_operator":"Запрос сотрудника","consent_declined":"Отказ от ИИ","consent_not_configured":"Согласие ещё не настроено","external_processing_not_enabled":"Передача в ИИ выключена","no_published_cards":"Нет опубликованных ответов","processing_error":"Ошибка обработки","clarification_limit":"Лимит уточнений","unsupported_attachment":"Неподдерживаемое вложение"}
 
 
 LABELS.update({"delivery_failed":"Не удалось отправить ответ", "state_changed_before_send":"Ответ отменён после изменения настроек или карточки", "empty_message":"Нет текста или поддерживаемого изображения", "accepted":"Получено", "declined":"Отказ", "revoked":"Отозвано", "unknown":"Не получено", "awaiting_operator":"Ожидает сотрудника"})
 LABELS.update({'waiting_user':'Ждём пользователя','staff_joined':'Ответил сотрудник'})
 LABELS.update({'thanks':'Благодарность','acknowledge':'Ответ на благодарность','bot':'У бота'})
+LABELS['greeting']='Приветствие'
 LABELS.update({'feedback':'Оценка помощи бота','feedback_duplicate':'Оценка уже сохранена','feedback_invalid':'Недействительная оценка'})
 LABELS.update({'inactivity':'Закрыто по неактивности','manual':'Завершено сотрудником'})
 LABELS.update({'normal':'Без ограничений полётов','cover':'При ограничениях полётов (КОВЁР)'})
 LABELS.update({'staff_action_required':'Нужно действие сотрудника','answer_not_helpful':'Готовый ответ не помог','unsafe_request':'Нужна помощь сотрудника по безопасности','out_of_scope':'Вопрос вне тематики','card_requires_staff':'Карточка требует участия сотрудника','bot_paused':'Автоответы отключены','rate_limited':'Сработал лимит сообщений','input_rejected':'Сообщение обработано защитой','message_rate':'Слишком частые сообщения','dialogue_backlog':'Много сообщений в ожидании','queue_capacity':'Очередь заполнена','message_size':'Слишком длинное сообщение','instruction_attempt':'Попытка изменить правила бота','user_ai_budget':'Лимит обработки пользователя','global_ai_budget':'Общий лимит обработки'})
+LABELS.update({'flight_info':'Информация о табло','flight_board':'Ответ по табло','flight_details_needed':'Уточнение рейса','flight_unavailable':'Табло недоступно или устарело','flight_not_found':'Рейс не найден в табло','flight_outside_board':'Дата вне периода табло','flight_refresh':'Обновление данных рейса'})
 
 
 def create_app(config, database=None):
@@ -413,7 +416,7 @@ def create_app(config, database=None):
         tickets=db.all("SELECT * FROM tickets WHERE peer_id=? AND status IN ('open','waiting_user') ORDER BY id DESC",(peer_id,))
         revision=inbox.revision(peer_id)
         topics=sorted({topic_label(row['topic']) for row in db.all("SELECT DISTINCT topic FROM cards WHERE topic!=''")})
-        return render(request, '_dialogue.html' if fragment else 'dialogue.html',fragment=fragment,title=c['user_name'] or f"Диалог {peer_id}",conversation=c,tickets=tickets,messages=inbox.timeline(peer_id,limit=30),revision=revision,draft=draft,form_key=form_key,peer_id=peer_id,topics=topics,readonly=False,bot_paused=c['bot_paused_until']>time.time(),protection_events=Protection(db).state(peer_id))
+        return render(request, '_dialogue.html' if fragment else 'dialogue.html',fragment=fragment,title=c['user_name'] or f"Диалог {peer_id}",conversation=c,tickets=tickets,messages=inbox.timeline(peer_id,limit=30,include_sessions=True),revision=revision,draft=draft,form_key=form_key,peer_id=peer_id,topics=topics,readonly=False,bot_paused=c['bot_paused_until']>time.time(),protection_events=Protection(db).state(peer_id))
 
     @router.get('/dialogue/{peer_id}/updates')
     def dialogue_updates(request: Request, peer_id: int):
@@ -425,7 +428,7 @@ def create_app(config, database=None):
         if revision==request.query_params.get('revision'):
             return dict(revision=revision)
         active=db.one("SELECT status FROM tickets WHERE peer_id=? AND status IN ('open','waiting_user')",(peer_id,))
-        return dict(revision=revision,html=templates.get_template('_messages.html').render(messages=inbox.timeline(peer_id,limit=30),peer_id=peer_id,readonly=False,csrf=request.session['csrf'],group_id=config.group_id),status='Отвечает сотрудник' if c['human_mode'] else 'Автоответы отключены' if c['bot_paused_until']>time.time() else 'Отвечает бот')
+        return dict(revision=revision,html=templates.get_template('_messages.html').render(messages=inbox.timeline(peer_id,limit=30,include_sessions=True),peer_id=peer_id,readonly=False,csrf=request.session['csrf'],group_id=config.group_id),status='Отвечает сотрудник' if c['human_mode'] else 'Автоответы отключены' if c['bot_paused_until']>time.time() else 'Отвечает бот')
 
     def selected_statistics_period(request):
         try:
@@ -452,7 +455,7 @@ def create_app(config, database=None):
             counts[topic_label(row['topic']) or 'Тема не указана']+=row['n']
         topics=[dict(topic=topic,n=n) for topic,n in sorted(counts.items(),key=lambda pair:(-pair[1],pair[0]))]
         closures=db.one("SELECT sum(closure_reason='inactivity') inactivity,sum(closure_reason='manual') manual FROM tickets WHERE status='closed' AND closed_at>=? AND closed_at<?",bounds)
-        return render(request, "statistics.html",title="Статистика",totals=totals,outcomes=outcomes,topics=topics,period=period,periods=PERIODS,today=today,from_date=period['from_date'],to_date=period['to_date'],closures=closures,automation=automation['summary'],daily=automation['days'],feedback=feedback_report(db,*bounds))
+        return render(request, "statistics.html",title="Статистика",totals=totals,outcomes=outcomes,topics=topics,period=period,periods=PERIODS,today=today,from_date=period['from_date'],to_date=period['to_date'],closures=closures,automation=automation['summary'],daily=automation['days'],feedback=feedback_report(db,*bounds),session_closures=db.one("SELECT sum(closure_reason='rating') rating,sum(closure_reason='inactivity') inactivity,sum(closure_reason='manual') manual FROM dialogue_sessions WHERE closed_at>=? AND closed_at<?",bounds))
 
     @router.get('/feedback.csv')
     def export_feedback(request: Request):
@@ -546,7 +549,16 @@ def create_app(config, database=None):
                     if request.state.form.get("synthetic")!="on":
                         raise ValueError("Для теста используйте вымышленные данные и подтвердите это.")
                     if is_thanks(text):
-                        decision=dict(action='acknowledge',kind='thanks',reason='Готовый ответ без вызова ИИ.')
+                        decision=dict(action='acknowledge',kind='thanks',reply=THANKS_TEXT,reason='Готовый ответ без вызова ИИ.')
+                        return render(request, "preview.html",title="Проверка ответа",text=text,decision=decision,answer_card=None)
+                    if is_greeting(text):
+                        decision=dict(action='greeting',reply=GREETING_TEXT,reason='Готовое приветствие без вызова ИИ.')
+                        return render(request, "preview.html",title="Проверка ответа",text=text,decision=decision,answer_card=None)
+                    query = parse_query(text)
+                    if query is not None:
+                        result = answer_query(query)
+                        decision = dict(action=result.outcome, source='flight_board', reply=result.text,
+                                        topic='Рейсы', reason='Поиск по табло Пулково без вызова ИИ.')
                         return render(request, "preview.html",title="Проверка ответа",text=text,decision=decision,answer_card=None)
                     if not selected:
                         raise ValueError("Сначала опубликуйте проверенные карточки.")
@@ -559,8 +571,6 @@ def create_app(config, database=None):
                             card['rendered_answer']=db.render_answer(card)
                         selected=candidates
                         decision=ai.route(text,selected)
-                    if decision.get('kind')=='thanks':
-                        decision['action']='acknowledge'
                     answer_card=next((c for c in selected if c['id']==decision.get('card_id')),None)
                     if handoff_reason(decision,answer_card):
                         decision['action']='handoff'

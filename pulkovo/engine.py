@@ -2,10 +2,11 @@ import json
 import time
 
 from .ai import AIError, AccessStopped, download_image
-from .consent import consent_configured, consent_message
+from .consent import consent_configured, consent_message, is_typed_consent
 from .search import searcher
-from .dialogue_rules import is_thanks
+from .dialogue_rules import GREETING_TEXT, THANKS_TEXT, FEEDBACK_THANKS_TEXT, is_greeting, is_thanks, without_opening_greeting
 from .feedback import Feedback
+from .flights import SHARED_BOARD, parse_query, answer_query, previous_query
 from .routing import STAFF_REASONS, handoff_reason, needs_full_catalog
 from .protection import Protection, instruction_attack, UNSAFE_TEXT, TOO_LONG_TEXT, AI_LIMIT_TEXT
 
@@ -18,9 +19,11 @@ class Engine:
     def __init__(self, db, ai, config):
         self.db, self.ai, self.config = db, ai, config
         self.searches = {}
+        self.flight_board = SHARED_BOARD
 
-    def consent_keyboard(self):
-        return keyboard([("Согласен",{"action":"agree","version":self.db.setting("consent_version")}), ("Без ИИ — к сотруднику",{"action":"decline"})])
+    def consent_keyboard(self, settings=None):
+        settings=self.db.settings() if settings is None else settings
+        return keyboard([("Согласен",{"action":"agree","version":settings['consent_version']}), ("Без ИИ — к сотруднику",{"action":"decline"})])
 
     def normal_keyboard(self):
         # Пустая клавиатура убирает ранее показанные постоянные кнопки VK.
@@ -48,8 +51,14 @@ class Engine:
             control={'action':control['action']}
         if control.get('action') == 'feedback':
             control={key:str(control.get(key,''))[:100] for key in ('action','token','rating')}
+        if not control and not attachments and is_typed_consent(text):
+            offer=self.db.consent_offer(peer_id)
+            if offer:
+                control={'action':'agree','version':offer['consent_prompt_version'],'source':'text','prompt_id':offer['id']}
         if not control and not attachments and is_thanks(text):
             control={'local_intent':'thanks'}
+        elif not control and not attachments and is_greeting(text):
+            control={'local_intent':'greeting'}
         if control.get("action") in ("decline","revoke"):
             state='declined' if control['action']=='decline' else 'revoked'
             if self.db.conversation(peer_id,user_id)['consent_state']!=state:
@@ -93,9 +102,15 @@ class Engine:
 
     def prepare(self, request, outcome, reply=None, *, reason="", card=None, decision=None, generation=None, usage=None, keys=None):
         decision, usage = decision or {}, usage or {}
+        if reply and outcome in ('answer','clarify','greeting','handoff') and self.db.has_recent_reply(request['peer_id'], request['id']):
+            reply = without_opening_greeting(reply)
         self.db.execute("UPDATE requests SET status=?,outcome=?,reason=?,reply=?,keyboard=?,card_id=?,card_version=?,topic=?,intent=?,tone=?,ai_generation=?,prompt_tokens=?,completion_tokens=?,updated_at=? WHERE id=?", (
             "ready" if reply else "done",outcome,reason,reply,keys or self.normal_keyboard(),card["id"] if card else None,card["version"] if card else None,card["topic"] if card else decision.get("topic"),str(decision.get("intent",""))[:250],decision.get("tone"),generation,int(usage.get("prompt_tokens",0)),int(usage.get("completion_tokens",0)),time.time(),request["id"]))
         self.db.refresh_ticket_topics(request['peer_id'])
+        if outcome=='consent_required':
+            shown=json.loads(json.loads(keys)['buttons'][0][0]['action']['payload'])['version']
+            self.db.execute('UPDATE requests SET consent_prompt_version=?,consent_prompt_generation=? WHERE id=?',
+                (shown,self.db.conversation(request['peer_id'])['generation'],request['id']))
 
     def to_human(self, request, reason, decision=None, usage=None, card=None):
         self.db.handoff(request,reason)
@@ -103,7 +118,7 @@ class Engine:
 
     def thank(self, request, generation, usage=None):
         self.db.execute('UPDATE conversations SET clarification_count=0 WHERE peer_id=?',(request['peer_id'],))
-        self.prepare(request,'thanks','Пожалуйста!',generation=generation,usage=usage)
+        self.prepare(request,'thanks',THANKS_TEXT,generation=generation,usage=usage)
 
     def process(self, request):
         current=self.db.one('SELECT status FROM requests WHERE id=?',(request['id'],))
@@ -115,7 +130,7 @@ class Engine:
             action = json.loads(request["payload"] or "{}").get("action")
             if action == 'feedback':
                 result=Feedback(self.db).vote(peer,json.loads(request['payload']))
-                self.prepare(request,'feedback' if result=='accepted' else 'feedback_'+result,'Спасибо за оценку!' if result=='accepted' else None)
+                self.prepare(request,'feedback' if result=='accepted' else 'feedback_'+result,FEEDBACK_THANKS_TEXT if result=='accepted' else None)
                 return
             settings = self.db.settings()
             if action == "revoke":
@@ -125,12 +140,19 @@ class Engine:
                 self.to_human(request,"consent_declined" if action=="decline" else "user_requested_operator")
                 return
             if action == "agree":
-                version = json.loads(request["payload"]).get("version","")
-                if not consent_configured(settings) or version != settings["consent_version"]:
-                    self.prepare(request,"consent_required","Условия согласия обновлены или ещё не опубликованы.\n\n" + consent_message(settings),keys=self.consent_keyboard())
+                payload=json.loads(request['payload'])
+                version = payload.get("version","")
+                offer=self.db.consent_offer(peer)
+                stale_text=payload.get('source')=='text' and (not offer or offer['id']!=payload.get('prompt_id'))
+                if not consent_configured(settings) or version != settings["consent_version"] or stale_text:
+                    self.prepare(request,"consent_required","Условия согласия обновлены или ещё не опубликованы.\n\n" + consent_message(settings),keys=self.consent_keyboard(settings))
                     return
-                self.db.record_consent(peer,request["user_id"],"accepted",request["event_key"])
-                message = "Согласие сохранено. Отправьте ваш вопрос или изображение.\n\nПри необходимости: /оператор — обратиться к сотруднику; /отозвать — прекратить обработку через ИИ."
+                accepted=self.db.record_consent(peer,request["user_id"],"accepted",request["event_key"],text_snapshot=offer['reply'] if offer else None,expected_version=version)
+                if not accepted:
+                    settings=self.db.settings()
+                    self.prepare(request,'consent_required',consent_message(settings),keys=self.consent_keyboard(settings))
+                    return
+                message = "✅ Согласие сохранено.\n\nНапишите ваш вопрос или отправьте фотографию.\n\n/оператор: обратиться к сотруднику\n/отозвать: прекратить обработку через ИИ"
                 if self.db.conversation(peer)["human_mode"]:
                     message = "Согласие сохранено. Ваш диалог остаётся у сотрудника до завершения обращения."
                 elif self.db.conversation(peer)['bot_paused_until']>time.time():
@@ -148,20 +170,37 @@ class Engine:
             if json.loads(request['payload'] or '{}').get('input_too_long'):
                 self.prepare(request,'input_rejected',TOO_LONG_TEXT if protection.notice(peer,'message_size') else None,reason='message_size')
                 return
-            if json.loads(request['payload'] or '{}').get('local_intent')=='thanks':
+            if json.loads(request['payload'] or '{}').get('local_intent')=='thanks' and conversation['consent_state']!='unknown':
                 self.thank(request,conversation['generation'])
                 return
             if not self.db.allowed(peer):
                 if not consent_configured(settings):
                     self.to_human(request,"consent_not_configured")
                 else:
-                    self.prepare(request,"consent_required",consent_message(settings),keys=self.consent_keyboard())
+                    self.prepare(request,"consent_required",consent_message(settings),keys=self.consent_keyboard(settings))
                 return
-            if not self.config.external_user_data:
-                self.to_human(request,"external_processing_not_enabled")
+            if json.loads(request['payload'] or '{}').get('local_intent')=='greeting':
+                self.prepare(request,'greeting',GREETING_TEXT,generation=conversation['generation'])
                 return
             if instruction_attack(request['text']):
                 self.prepare(request,'input_rejected',UNSAFE_TEXT if protection.notice(peer,'instruction_attempt') else None,reason='instruction_attempt')
+                return
+            if not json.loads(request['attachments']):
+                query = (json.loads(request['flight_query']) if request.get('flight_query') and request['reason']=='flight_refresh'
+                         else parse_query(request['text'], previous_query(self.db, request, conversation['generation'])))
+                if query is not None:
+                    result = answer_query(query, self.flight_board)
+                    if not self.db.allowed(peer, conversation['generation']) or not consent_configured(self.db.settings()):
+                        self.prepare(request, 'cancelled', reason='state_changed_before_send')
+                        return
+                    self.db.execute('UPDATE requests SET flight_query=?,flight_valid_until=? WHERE id=?',
+                        (json.dumps(result.query), result.valid_until, request['id']))
+                    self.db.execute('UPDATE conversations SET clarification_count=0 WHERE peer_id=?', (peer,))
+                    self.prepare(request, result.outcome, result.text, reason=result.reason,
+                        decision={'topic':'Рейсы','intent':'flight_board'}, generation=conversation['generation'])
+                    return
+            if not self.config.external_user_data:
+                self.to_human(request,"external_processing_not_enabled")
                 return
             limit=protection.reserve_ai(peer)
             if limit:
@@ -220,7 +259,7 @@ class Engine:
             if not guard():
                 raise AccessStopped("Диалог изменён во время обработки")
             card = next((c for c in candidates if c["id"] == decision.get("card_id")),None)
-            if decision['kind']=='thanks':
+            if decision['action']=='acknowledge' and decision['kind']=='thanks':
                 self.thank(request,generation,usage)
             elif reason := handoff_reason(decision,card):
                 self.to_human(request,reason,decision,usage,card)
@@ -263,7 +302,7 @@ class Engine:
         if self.db.conversation(request['peer_id'])['bot_paused_until']>time.time() and request['outcome'] not in ('consent_revoked','consent_accepted','feedback','handoff'):
             self.db.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='bot_paused' WHERE id=?",(request['id'],))
             return True
-        if request['outcome']=='thanks':
+        if request['outcome'] in ('thanks','greeting'):
             current=self.db.conversation(request['peer_id'])
             if current['human_mode'] or current['generation']!=request['ai_generation']:
                 self.db.execute("UPDATE requests SET status='cancelled',reply=NULL WHERE id=?",(request['id'],))
@@ -274,7 +313,9 @@ class Engine:
             stale_card = request["card_id"] and (not card or card["status"] != "published" or card["visibility"] != "public" or card["version"] != request["card_version"] or card["mode"] not in ("any",current_mode))
             if card and not stale_card:
                 try:
-                    stale_card = self.db.render_answer(card) != request["reply"]
+                    rendered = self.db.render_answer(card)
+                    # The only allowed formatting difference is the salutation.
+                    stale_card = request['reply'] not in (rendered, without_opening_greeting(rendered))
                 except ValueError:
                     stale_card = True
             if not self.db.allowed(request["peer_id"],request["ai_generation"]) or not consent_configured(self.db.settings()) or stale_card:
@@ -283,6 +324,10 @@ class Engine:
                 transport.mark_human(request["peer_id"])
                 return True
         try:
+            if request.get('flight_valid_until') and time.time() >= request['flight_valid_until']:
+                # A queued/retried VK message must refresh operational data before sending.
+                self.db.execute("UPDATE requests SET status='pending',reply=NULL,reason='flight_refresh',flight_valid_until=NULL WHERE id=?", (request['id'],))
+                return True
             transport.send(request["peer_id"],request["reply"],request["keyboard"],request["random_id"])
         except Exception:
             attempts = request["send_attempts"]+1

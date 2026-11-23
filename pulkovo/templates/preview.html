@@ -6,8 +6,10 @@
 <button class="primary">Проверить ответ</button></form></section>
 {% if decision %}<section class="panel"><h2>{{decision.action|label}}</h2>
 {% if decision.action=='answer' and answer_card %}<blockquote>{{answer_card.rendered_answer}}</blockquote><a href="/cards/{{answer_card.id}}">Открыть карточку: {{answer_card.title}} →</a>
+{% elif decision.source=='flight_board' %}<blockquote>{{decision.reply}}</blockquote>
 {% elif decision.action=='clarify' %}<blockquote>{{decision.question}}</blockquote>
-{% elif decision.action=='acknowledge' %}<blockquote>Пожалуйста!</blockquote>
+{% elif decision.action=='acknowledge' %}<blockquote>{{decision.reply or "Пожалуйста! 🙂"}}</blockquote>
+{% elif decision.action=='greeting' %}<blockquote>{{decision.reply}}</blockquote>
 {% else %}<p>Обращение появится в очереди сотрудника. Бот приостановит автоматические ответы в этом диалоге.</p>{% endif %}
 {% if decision.topic %}<p class="muted">Тема: {{decision.topic|topic_label}}</p>{% endif %}
 {% if decision.reason %}<p class="small muted">{{decision.reason}}</p>{% endif %}</section>{% endif %}

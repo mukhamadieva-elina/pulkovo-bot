@@ -3,10 +3,11 @@
 import json
 import secrets
 import time
+from .sessions import record_delivery, close_after_rating
 
 DELAY = 60 * 60
 COOLDOWN = 24 * 60 * 60
-QUESTION = 'Как вы оцениваете помощь бота?'
+QUESTION = 'Как вы оцениваете помощь бота?\n\nВыберите «Хорошо» или «Плохо».'
 
 
 def is_feedback_payload(payload):
@@ -54,6 +55,8 @@ class Feedback:
         with self.db.connect() as con:
             con.execute('BEGIN IMMEDIATE')
             con.execute("UPDATE requests SET status='sent',send_attempts=send_attempts+1,updated_at=? WHERE id=?", (now, request['id']))
+            if not request['outcome'].startswith('feedback'):
+                record_delivery(con,request['id'],now)
             if request['outcome'] == 'thanks':
                 con.execute("UPDATE feedback_surveys SET activity_request_id=?,last_activity_at=?,due_at=?,updated_at=? WHERE peer_id=? AND generation=? AND status='pending'", (request['id'], now, now+DELAY, now, peer, request['ai_generation']))
                 return
@@ -89,6 +92,7 @@ class Feedback:
             if row['rating'] is not None:
                 return 'duplicate'
             con.execute("UPDATE feedback_surveys SET rating=?,rated_at=?,status='sent',sent_at=coalesce(sent_at,attempted_at,?),updated_at=? WHERE id=?", (rating, now, now, now, row['id']))
+            close_after_rating(con,row,now)
             return 'accepted'
 
     def _eligible(self, con, survey, now):

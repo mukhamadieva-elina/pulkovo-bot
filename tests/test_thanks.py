@@ -46,11 +46,11 @@ class ThanksTests(unittest.TestCase):
         self.engine.deliver(self.transport)
         self.ai.reset_mock()
         row=self.process('Спасибо')
-        self.assertEqual((row['outcome'],row['reply'],row['prompt_tokens']),('thanks','Пожалуйста!',0))
+        self.assertEqual((row['outcome'],row['reply'],row['prompt_tokens']),('thanks','Пожалуйста! 🙂',0))
         self.assertEqual(self.ai.mock_calls,[])
         self.assertEqual(self.db.all('SELECT * FROM tickets'),[])
         self.engine.deliver(self.transport)
-        self.assertEqual(self.transport.send.call_args.args[1],'Пожалуйста!')
+        self.assertEqual(self.transport.send.call_args.args[1],'Пожалуйста! 🙂')
         self.assertFalse(self.db.conversation(11)['human_mode'])
 
     def test_local_thanks_needs_neither_consent_nor_ai_nor_cards(self):
@@ -119,7 +119,7 @@ class ThanksTests(unittest.TestCase):
     def test_ai_can_recognize_nonstandard_gratitude(self):
         self.ai.route.return_value=dict(action='acknowledge',card_id=None,kind='thanks',tone='positive',usage={'prompt_tokens':10,'completion_tokens':2})
         row=self.process('От души, вы мне очень помогли')
-        self.assertEqual((row['outcome'],row['reply'],row['prompt_tokens']),('thanks','Пожалуйста!',10))
+        self.assertEqual((row['outcome'],row['reply'],row['prompt_tokens']),('thanks','Пожалуйста! 🙂',10))
         self.assertFalse(self.db.conversation(11)['human_mode'])
 
     def test_ai_contract_accepts_acknowledge_only_for_thanks(self):
@@ -138,5 +138,5 @@ class ThanksTests(unittest.TestCase):
         with patch('pulkovo.web.GigaChat') as ai:
             page=client.post('/preview',data={'csrf':'test','action':'ai','text':'Спасибо','synthetic':'on'}).text
         ai.assert_not_called()
-        self.assertIn('<blockquote>Пожалуйста!</blockquote>',page)
+        self.assertIn('<blockquote>Пожалуйста! 🙂</blockquote>',page)
         self.assertNotIn('Обращение появится в очереди сотрудника',page)

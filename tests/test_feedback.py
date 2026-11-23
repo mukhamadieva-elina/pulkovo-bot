@@ -287,7 +287,7 @@ class FeedbackVoteTests(FeedbackFixture):
         survey = self.send_survey(); self.ai.reset_mock()
         before = automation_summary(self.db, 0, self.now+100)
         row = self.message('Хорошо', payload=self.payload(survey))
-        self.assertEqual((row['outcome'], row['reply']), ('feedback', 'Спасибо за оценку!'))
+        self.assertEqual((row['outcome'], row['reply']), ('feedback', 'Спасибо за оценку!\n\nЕсли появится новый вопрос, напишите сюда.'))
         self.assertEqual(self.survey()['rating'], 'good')
         row = self.message('Плохо', payload=self.payload(survey, 'bad'))
         self.assertEqual((row['outcome'], row['reply']), ('feedback_duplicate', None))

@@ -9,6 +9,7 @@
 <label class="checkbox"><input type="checkbox" name="cover_mode" {{'checked' if settings.cover_mode=='true' else ''}}> Включить ответы при ограничениях полётов (КОВЁР)</label>
 <label class="checkbox"><input type="checkbox" name="feedback_enabled" {{'checked' if settings.feedback_enabled=='true' else ''}}> Просить оценить помощь бота</label>
 <p class="small muted">Через 60 минут тишины после готового ответа, если сотрудник не подключался и бот не ждет уточнения. Новые сообщения начинают отсчет заново. Не чаще одного опроса в 24 часа для пользователя, без напоминаний. Оценки доступны в статистике.</p>
+<p class="small muted">Оценка завершает текущую консультацию бота. Без оценки сессия закрывается через 24 часа после последнего сообщения пассажира или ответа бота. Сам опрос не продлевает этот срок. Новый вопрос начинает новую сессию в том же диалоге. Работа сотрудника завершается отдельно.</p>
 <details><summary>Дополнительные настройки</summary>
 <label>Сколько уточнений может задать бот<input type="number" name="max_clarifications" value="{{settings.max_clarifications}}" min="0" max="5"></label>
 <label>Хранить содержание обращений, дней<input type="number" name="retention_days" value="{{settings.retention_days}}" min="1" max="365"></label>
@@ -16,7 +17,8 @@
 </section>
 <section class="panel"><h2>Согласие на обработку</h2>
 <p class="muted">Пользователь видит этот текст перед первым обращением к ИИ. После изменения текста или ссылки бот автоматически запросит согласие заново.</p>
-<label>Текст первого сообщения<textarea name="consent_text" rows="12" required>{{settings.consent_text}}</textarea></label>
+<label>Текст условий обработки данных<textarea name="consent_text" rows="12" required>{{settings.consent_text}}</textarea></label>
+<p class="small muted">Перед условиями бот добавляет описание своих возможностей, после них: инструкцию о кнопке и текстовом согласии. «Согласен» и «Согласна» отдельным сообщением принимаются только после отправки актуальных условий. Версия условий и показанное сообщение сохраняются.</p>
 <label>Ссылка на подробные условия — необязательно<input type="url" name="consent_url" value="{{settings.consent_url}}" placeholder="https://…"></label>
 <label class="checkbox"><input type="checkbox" name="consent_ready" {{'checked' if settings.consent_ready=='true' else ''}}> Текст готов к показу пользователям</label>
 <p class="small muted">Обработка через GigaChat {{'включена' if external else 'выключена'}}. Постоянных кнопок в чате нет; команды /оператор и /отозвать доступны всегда.</p>

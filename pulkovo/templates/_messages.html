@@ -1,4 +1,4 @@
-{% for m in messages %}<article class="message chat-{{m.kind}}" data-message-id="{{m.id}}">
+{% for m in messages %}{% if m.kind=='boundary' %}<div class="session-boundary" data-message-id="{{m.id}}" role="separator" aria-label="{{m.text}} · {{m.boundary_at|date}}"><span>{{m.text}}</span><small>{{m.boundary_at|date}}</small></div>{% else %}<article class="message chat-{{m.kind}}" data-message-id="{{m.id}}">
 <div class="message-meta"><strong>{{m.author}}</strong> · {{m.created_at|date}}{% if m.status %} · {{m.status|label}}{% endif %}</div>
 {% if m.text %}<p{% if m.control %} class="message-control"{% endif %}>{{m.text}}</p>{% endif %}
 {% for a in m.attachments %}{% set image_url=a.url|default('')|vk_image_url %}
@@ -7,4 +7,4 @@
 {% endfor %}
 {% if m.error %}<p class="attention">{{m.error}} Перед отменой проверьте диалог в VK: при обрыве связи сообщение могло дойти.</p>{% endif %}
 {% if not readonly and m.outbox_id and m.status in ('pending','failed') %}<form method="post" class="actions"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="outbox_id" value="{{m.outbox_id}}">{% if m.status=='failed' %}<button name="action" value="retry">Повторить отправку</button>{% endif %}<button name="action" value="cancel">Отменить отправку</button></form>{% endif %}
-</article>{% else %}<p class="muted">Сообщений пока нет.</p>{% endfor %}
+</article>{% endif %}{% else %}<p class="muted">Сообщений пока нет.</p>{% endfor %}

@@ -68,7 +68,7 @@ _RESULTS = """
         FROM requests r LEFT JOIN handed h ON h.request_id=r.id
         WHERE r.created_at>=? AND r.created_at<?
           AND coalesce(r.outcome,'') NOT IN
-              ('thanks','consent_required','consent_accepted','consent_revoked')
+              ('thanks','greeting','consent_required','consent_accepted','consent_revoked')
           AND coalesce(r.reason,'')!='consent_declined'
           AND coalesce(r.outcome,'') NOT LIKE 'feedback%'
           AND coalesce(json_extract(

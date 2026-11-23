@@ -9,6 +9,8 @@ from .migrations import migrate
 from .resources import bind_answer
 from .feedback import cancel_pending, record_activity, message_random_id
 from .protection import admit, LIMIT_TEXT
+from .dialogue_rules import GREETING_IDLE_SECONDS
+from .sessions import close_session, ensure_session, expire_idle
 
 
 DEFAULT_SETTINGS = {
@@ -185,18 +187,31 @@ class Database:
         self.execute("INSERT OR IGNORE INTO conversations(peer_id,user_id,updated_at) VALUES (?,?,?)", (peer_id, user_id or peer_id, time.time()))
         return self.one("SELECT * FROM conversations WHERE peer_id=?", (peer_id,))
 
-    def record_consent(self, peer_id, user_id, action, event_key):
-        settings = self.settings()
+    def consent_offer(self, peer_id):
+        """Only a successfully delivered offer for the current dialogue state."""
+        return self.one("""SELECT r.* FROM requests r JOIN conversations c ON c.peer_id=r.peer_id
+            WHERE r.peer_id=? AND r.status='sent' AND r.outcome='consent_required'
+            AND r.consent_prompt_version=(SELECT value FROM settings WHERE key='consent_version')
+            AND r.consent_prompt_generation=c.generation AND r.updated_at>=?
+            AND c.human_mode=0 AND c.bot_paused_until<=?
+            AND NOT (c.consent_state='accepted' AND c.consent_version=r.consent_prompt_version)
+            ORDER BY r.id DESC LIMIT 1""", (peer_id,time.time()-86400,time.time()))
+
+    def record_consent(self, peer_id, user_id, action, event_key, *, text_snapshot=None, expected_version=None):
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            inserted = con.execute("INSERT OR IGNORE INTO consent_events(peer_id,user_id,action,version,document_url,text_snapshot,vk_event_key,created_at) VALUES (?,?,?,?,?,?,?,?)", (peer_id, user_id, action, settings["consent_version"], settings["consent_url"], settings["consent_text"], event_key, time.time())).rowcount
+            settings=dict(con.execute('SELECT key,value FROM settings'))
+            if expected_version is not None and expected_version!=settings['consent_version']:
+                return False
+            inserted = con.execute("INSERT OR IGNORE INTO consent_events(peer_id,user_id,action,version,document_url,text_snapshot,vk_event_key,created_at) VALUES (?,?,?,?,?,?,?,?)", (peer_id, user_id, action, settings["consent_version"], settings["consent_url"], text_snapshot if text_snapshot is not None else settings["consent_text"], event_key, time.time())).rowcount
             if not inserted:
-                return
+                return False
             con.execute("UPDATE conversations SET consent_state=?,consent_version=?,generation=generation+1,clarification_count=0,updated_at=? WHERE peer_id=?", (action, settings["consent_version"], time.time(), peer_id))
             cancel_pending(con,peer_id,'consent_changed')
             if action != "accepted":
                 con.execute("UPDATE requests SET text='',attachments='[]',image_descriptions='[]' WHERE peer_id=?", (peer_id,))
                 con.execute("UPDATE requests SET status='cancelled',reply=NULL,keyboard=NULL WHERE peer_id=? AND status='ready' AND ai_generation IS NOT NULL", (peer_id,))
+            return True
 
     def allowed(self, peer_id, generation=None):
         c = self.conversation(peer_id)
@@ -217,12 +232,20 @@ class Database:
                 cancel_pending(con,peer_id,'rate_limited')
             if limited and not notice:
                 return None
+            if not limited:
+                expire_idle(con,time.time(),peer_id)
             cur = con.execute("INSERT OR IGNORE INTO requests(event_key,peer_id,user_id,text,attachments,input_type,payload,random_id,created_at,updated_at,vk_cmid,vk_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (event_key, peer_id, user_id, text if permitted else "", json.dumps(attachments) if permitted else "[]", "mixed" if text and attachments else "image" if attachments else "text", payload, message_random_id(con), time.time(), time.time(), vk_cmid, vk_date))
             if limited:
                 con.execute("UPDATE requests SET status='ready',outcome='rate_limited',reason=?,reply=?,keyboard=? WHERE id=?",(limited,LIMIT_TEXT,json.dumps({'one_time':True,'buttons':[]}),cur.lastrowid))
             if cur.rowcount and not is_feedback:
+                if not limited:
+                    session_id=ensure_session(con,peer_id,time.time())
+                    con.execute('UPDATE requests SET session_id=? WHERE id=?',(session_id,cur.lastrowid))
                 con.execute("UPDATE tickets SET status='open' WHERE peer_id=? AND status='waiting_user'", (peer_id,))
                 record_activity(con,peer_id,cur.lastrowid,time.time())
+            elif cur.rowcount and is_feedback:
+                token=json.loads(payload or '{}').get('token','')
+                con.execute('UPDATE requests SET session_id=(SELECT r.session_id FROM feedback_surveys f JOIN requests r ON r.id=f.request_id WHERE f.peer_id=? AND f.token=?) WHERE id=?',(peer_id,token,cur.lastrowid))
             return cur.lastrowid
 
     def staff_replied(self, peer_id, event_key, admin_id, vk_cmid, sent_at, *, expected_ticket_id=None, text=None, attachments=None, source='vk', staff_name='', basis_request_id=None, history_only=False):
@@ -257,6 +280,7 @@ class Database:
             if basis_request_id is not None and latest['id'] > basis_request_id:
                 newer_incoming = True
             status = 'open' if newer_incoming else 'waiting_user'
+            ensure_session(con,peer_id,time.time())
             if active:
                 con.execute('UPDATE tickets SET status=?,last_staff_reply_at=max(coalesce(last_staff_reply_at,0),?) WHERE id=?', (status,sent_at,active['id']))
             else:
@@ -264,12 +288,13 @@ class Database:
             self._refresh_ticket_topics(con,peer_id)
             con.execute('UPDATE conversations SET human_mode=1,generation=generation+1,updated_at=? WHERE peer_id=?', (time.time(),peer_id))
             cancel_pending(con,peer_id,'staff_joined')
-            con.execute("UPDATE requests SET status='cancelled',reason='staff_joined',reply=NULL WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks')", (peer_id,))
+            con.execute("UPDATE requests SET status='cancelled',reason='staff_joined',reply=NULL WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','flight_info')", (peer_id,))
             return True
 
     def handoff(self, request, reason):
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            ensure_session(con,request['peer_id'],time.time())
             con.execute("UPDATE conversations SET human_mode=1,generation=generation+1,updated_at=? WHERE peer_id=?", (time.time(), request["peer_id"]))
             cancel_pending(con,request['peer_id'],'handoff')
             con.execute("INSERT OR IGNORE INTO tickets(peer_id,request_id,reason,created_at) VALUES (?,?,?,?)", (request["peer_id"], request["id"], reason, time.time()))
@@ -289,10 +314,11 @@ class Database:
             if not latest:
                 raise ValueError('В диалоге пока нет сообщений.')
             now=time.time()
+            ensure_session(con,peer_id,now)
             con.execute("INSERT OR IGNORE INTO tickets(peer_id,request_id,reason,status,created_at) VALUES (?,?,'staff_joined','open',?)",(peer_id,latest['id'],now))
             con.execute("UPDATE tickets SET assigned_to=?,taken_at=? WHERE peer_id=? AND status IN ('open','waiting_user')",(name,now,peer_id))
             con.execute('UPDATE conversations SET human_mode=1,generation=generation+1,updated_at=? WHERE peer_id=?',(now,peer_id))
-            con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='staff_joined' WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks')",(peer_id,))
+            con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='staff_joined' WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','flight_info')",(peer_id,))
             cancel_pending(con,peer_id,'staff_joined')
             self._refresh_ticket_topics(con,peer_id)
             con.execute("INSERT INTO audit(action,target,created_at) VALUES ('take_dialogue',?,?)",(str(peer_id),now))
@@ -322,9 +348,10 @@ class Database:
             con.execute("""UPDATE requests SET status='done',outcome='human_mode',reason='closed_by_staff',reply=NULL,updated_at=?
                 WHERE peer_id=? AND status IN ('pending','processing')
                 AND coalesce(json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,'$.action'),'') NOT IN ('agree','revoke','feedback')""",(time.time(),peer_id))
-            con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='closed_by_staff' WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','rate_limited','input_rejected')",(peer_id,))
+            con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='closed_by_staff' WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','flight_info','rate_limited','input_rejected')",(peer_id,))
             cancel_pending(con,peer_id,'returned_to_bot')
             con.execute("UPDATE tickets SET status='closed',closed_at=?,closure_reason='manual' WHERE peer_id=? AND status IN ('open','waiting_user')", (time.time(), peer_id))
+            close_session(con,peer_id,'manual',time.time())
             con.execute("INSERT INTO audit(action,target,created_at) VALUES ('resume_bot',?,?)", (str(peer_id), time.time()))
 
     def pause_auto_close(self, peer_id, ticket_id, paused):
@@ -356,6 +383,7 @@ class Database:
                 return False
             self._refresh_ticket_topics(con,ticket['peer_id'])
             con.execute("UPDATE tickets SET status='closed',closure_reason='inactivity',closed_at=? WHERE id=?",(now,ticket_id))
+            close_session(con,ticket['peer_id'],'inactivity',now)
             con.execute("UPDATE conversations SET human_mode=0,generation=generation+1,clarification_count=0,updated_at=? WHERE peer_id=?",(now,ticket['peer_id']))
             con.execute("INSERT INTO audit(action,target,created_at) VALUES ('ticket_closed_inactive',?,?)",(str(ticket_id),now))
             return True
@@ -369,9 +397,18 @@ class Database:
                 (json.dumps(descriptions,ensure_ascii=False),request['id'],request['peer_id'],generation))
             return bool(result.rowcount)
 
+    def has_recent_reply(self, peer_id, request_id):
+        # Social continuity survives thanks, restart, and a handover to/from staff.
+        cutoff = time.time() - GREETING_IDLE_SECONDS
+        return bool(self.one("""SELECT 1 FROM requests
+            WHERE peer_id=? AND id<? AND status='sent' AND reply IS NOT NULL
+                AND updated_at>=?
+            UNION ALL SELECT 1 FROM staff_replies WHERE peer_id=? AND created_at>=?
+            LIMIT 1""", (peer_id, request_id, cutoff, peer_id, cutoff)))
+
     def history(self, peer_id, limit=4):
         generation = self.conversation(peer_id)["generation"]
-        rows=list(reversed(self.all("SELECT text,reply,image_descriptions FROM requests WHERE peer_id=? AND status='sent' AND ai_generation=? AND outcome IN ('answer','clarify') AND updated_at>=? AND id>coalesce((SELECT max(id) FROM requests WHERE peer_id=? AND outcome='thanks' AND status='sent'),0) ORDER BY id DESC LIMIT ?", (peer_id, generation,time.time()-1800, peer_id, limit))))
+        rows=list(reversed(self.all("SELECT text,reply,image_descriptions FROM requests WHERE peer_id=? AND status='sent' AND ai_generation=? AND session_id=(SELECT id FROM dialogue_sessions WHERE peer_id=requests.peer_id AND closed_at IS NULL) AND outcome IN ('answer','clarify') AND flight_query IS NULL AND updated_at>=? AND id>coalesce((SELECT max(id) FROM requests WHERE peer_id=? AND outcome='thanks' AND status='sent'),0) ORDER BY id DESC LIMIT ?", (peer_id, generation,time.time()-1800, peer_id, limit))))
         for row in rows:
             images=json.loads(row.pop('image_descriptions'))
             if images:
@@ -380,7 +417,7 @@ class Database:
 
     def purge(self):
         cutoff = time.time() - max(1, int(self.setting("retention_days"))) * 86400
-        self.execute("UPDATE requests SET text='',attachments='[]',reply=NULL,image_descriptions='[]' WHERE created_at<? AND status NOT IN ('pending','processing','ready','sending')", (cutoff,))
+        self.execute("UPDATE requests SET text='',attachments='[]',reply=NULL,image_descriptions='[]',flight_query=NULL,flight_valid_until=NULL WHERE created_at<? AND status NOT IN ('pending','processing','ready','sending')", (cutoff,))
         self.execute("UPDATE staff_replies SET text='',attachments='[]' WHERE created_at<?",(cutoff,))
         self.execute("UPDATE operator_outbox SET text='' WHERE created_at<? AND status IN ('sent','cancelled')",(cutoff,))
         self.execute('DELETE FROM protection_buckets WHERE updated_at<?',(cutoff,))

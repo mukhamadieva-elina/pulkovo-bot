@@ -1,0 +1,146 @@
+/* Pulkovo-inspired interface. Public logo source is recorded in README.md. */
+:root {
+  --ink: #172039;
+  --nav: #080e26;
+  --muted: #657084;
+  --line: #dfe4ee;
+  --bg: #f4f6fb;
+  --accent: #304bce;
+  --blue: #2847bd;
+  --brand-soft: #eaf0ff;
+  --brand-focus: #a9baff;
+}
+
+/* The faceted motif belongs to the chrome, leaving work areas quiet. */
+.sidebar {
+  background: var(--nav);
+  isolation: isolate;
+  overflow-y: auto;
+  border-right: 1px solid #ffffff0d;
+}
+.sidebar::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 210px;
+  background: url("brand/terminal-pattern.svg") center bottom / auto 210px;
+  opacity: .6;
+  z-index: -1;
+  pointer-events: none;
+}
+.brand { padding: 4px 14px 20px; border-bottom: 1px solid #ffffff24; }
+.brand:hover { text-decoration: none; }
+.pulkovo-wordmark { display: inline-flex; align-items: center; gap: 10px; color: #fff; font-family: inherit; }
+.pulkovo-wordmark img { display: block; width: 42px; height: auto; flex: none; }
+.pulkovo-wordmark b { font-size: inherit; font-weight: 750; line-height: 1; letter-spacing: .25px; }
+.brand .brand-logo { display: flex; width: 100%; margin: 0; font-size: 25px; color: #fff; }
+.brand span { color: #bac5df; font-size: 11px; letter-spacing: .25px; margin-top: 16px; }
+.sidebar nav { margin-top: 22px; }
+.sidebar nav a { color: #c1cce2; }
+.sidebar nav a:hover { background: #172441; color: #fff; }
+.sidebar nav a.active { background: #213464; border-left-color: #b8c9ff; color: #fff; }
+.count { background: #d9e4ff; color: #17284e; font-weight: 700; }
+.sidebar-bottom { padding-top: 26px; }
+.sidebar .quiet { color: #e1e8fa!important; border-color: #8495b366!important; }
+.sidebar .quiet:hover { background: #ffffff12!important; }
+
+.workspace > header { position: relative; min-height: 76px; }
+.eyebrow { color: #4b608e; letter-spacing: 1.3px; }
+.workspace > header::after {
+  content: "";
+  display: block;
+  width: 120px;
+  height: 46px;
+  flex: none;
+  margin-left: 20px;
+  background: url("brand/terminal-pattern.svg") center / cover;
+  clip-path: polygon(0 100%, 38% 0, 100% 0, 62% 100%);
+  opacity: .12;
+}
+h1 { font-weight: 700; letter-spacing: -.65px; }
+.metric, .panel { box-shadow: 0 3px 16px #0b193504; }
+.metric { border-top: 3px solid #c3ceee; }
+.metric strong { color: #172c63; font-variant-numeric: tabular-nums; }
+a.metric:hover { border-color: #8299d8; background: #fcfdff; }
+.metric:first-child { border-top-color: var(--accent); }
+.tabs .selected { background: var(--brand-soft); color: #25418f; box-shadow: inset 0 -2px #5874cc; }
+.tabs a:hover { background: #eaf0fa; text-decoration: none; }
+.table-panel tbody tr:hover { background: #f7f9fe; }
+th { color: #52627f; }
+.primary { background: var(--accent); border-color: var(--accent); box-shadow: 0 2px 4px #172d6614; }
+.primary:hover { background: #233cb0; border-color: #233cb0; filter: none; }
+button:focus-visible, .button:focus-visible, a:focus-visible, summary:focus-visible {
+  outline: 3px solid var(--brand-focus);
+  outline-offset: 3px;
+}
+input:focus, textarea:focus, select:focus, .answer-editor:focus {
+  outline-color: #b3c3fa;
+  border-color: #728bd1;
+}
+.notice:not(.warning):not(.error) { background: #edf2ff; border-color: #d7e0f6; }
+.badge { background: #e9edf5; color: #354565; }
+.badge.success { background: #e5f2eb; color: #287457; }
+.answer-field:hover, .answer-field:focus { color: #173588; }
+.answer-field:focus-visible, #dialogue-history:focus-visible { outline-color: var(--brand-focus); }
+
+.dialogue-window { border-color: #293958; box-shadow: 0 30px 100px #03091d99, 0 0 0 5px #ffffff22; }
+.dialogue-window::backdrop { background: #070e299c; }
+.dialogue-window-bar {
+  background: var(--nav) url("brand/terminal-pattern.svg") right center / 260px 130px no-repeat;
+  border-bottom-color: #647fc9;
+}
+.dialogue-brand-logo { font-size: 16px; gap: 7px; flex: none; margin-right: 6px; }
+.dialogue-brand-logo img { width: 28px; }
+.dialogue-window-caption > div { border-left: 1px solid #ffffff30; padding-left: 18px; }
+.dialogue-window-caption > div > span { color: #c4d0e8; }
+.dialogue-window-bar button { background: #0a122dd9; border-color: #a7b9db66; }
+.dialogue-window-bar button:hover { background: #243658; }
+.dialogue-window-bar button:focus-visible { outline-color: #fff; }
+.dialogue-dock {
+  background: var(--nav);
+  border-color: #637ba7;
+  border-top-color: #8fa8f2;
+  box-shadow: 0 8px 30px #0d1c3b38;
+}
+.dialogue-dock:hover { background: #172747; }
+.dialogue-dock:focus-visible { outline-color: #728bd1; }
+.dialogue-dock-update { color: #ffcf9e; }
+.dialogue-chat { background: #f6f8fc; }
+.control-action button { background: #eff3ff; border-color: #c3cfee; color: #28468f; }
+.dialogue-shell #dialogue-history .chat-bot,
+.dialogue-shell #dialogue-history .chat-staff { background: #eaf0ff; border-color: #d4def3; }
+/* Passenger messages keep the warm color requested for fast recognition. */
+.dialogue-shell #dialogue-history .chat-user { background: #fff0df; border-color: #edc49b; }
+
+.login-wrap {
+  background: var(--nav) url("brand/terminal-pattern.svg") right bottom / min(900px, 100vw) auto no-repeat;
+}
+.login-brand { font-size: 36px; gap: 14px; margin-bottom: 32px; }
+.login-brand img { width: 58px; }
+.login { border: 1px solid #ffffff30; box-shadow: 0 22px 70px #00000030; }
+.login .eyebrow { color: #4b608e; }
+
+@media (max-width: 1050px) {
+  .brand { padding-left: 8px; padding-right: 8px; }
+  .brand .brand-logo { font-size: 23px; gap: 8px; }
+  .brand-logo img { width: 36px; }
+  .workspace > header::after { display: none; }
+}
+@media (max-width: 740px) {
+  .sidebar { overflow: visible; }
+  .sidebar::after { display: none; }
+  .brand { border: 0; padding: 0; width: fit-content; }
+  .brand .brand-logo { width: auto; }
+  .brand span { margin-top: 8px; }
+  .sidebar nav { margin-top: 18px; }
+  .workspace > header { min-height: 0; }
+  .tabs { flex-wrap: wrap; }
+}
+@media (max-width: 600px) {
+  .dialogue-brand-logo { font-size: 14px; gap: 6px; margin-right: 0; }
+  .dialogue-brand-logo img { width: 24px; }
+  .dialogue-window-caption > div { padding-left: 12px; }
+  .dialogue-window-caption { gap: 12px; }
+  .dialogue-window-bar { background-size: 200px 100px; }
+  .login-wrap { padding: 28px 18px; }
+}

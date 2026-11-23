@@ -32,7 +32,7 @@ class AutomationStatisticsTests(unittest.TestCase):
     def test_percentage_uses_completed_results_not_all_incoming_messages(self):
         for _ in range(3):self.message()
         self.message('handoff',human=True)
-        for outcome in ('consent_required','consent_accepted','consent_revoked','thanks','clarify','human_mode'):
+        for outcome in ('consent_required','consent_accepted','consent_revoked','thanks','greeting','clarify','human_mode'):
             self.message(outcome)
         self.assertEqual(automation_summary(self.db,0,1000),dict(automated=3,handed_off=1,total=4,percent=75))
 
@@ -72,6 +72,7 @@ class AutomationStatisticsTests(unittest.TestCase):
             self.message('handoff',human=True,payload={'action':action})
         self.message('handoff',human=True,reason='consent_declined')
         self.message('thanks','failed',human=True,reason='delivery_failed')
+        self.message('greeting','failed',human=True,reason='delivery_failed')
         self.assertEqual(automation_summary(self.db,0,1000)['total'],0)
 
     def test_period_uses_incoming_date_and_inactivity_does_not_mean_success(self):
