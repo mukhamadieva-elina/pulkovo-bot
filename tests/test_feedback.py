@@ -1,4 +1,7 @@
+import csv
+import io
 import json
+import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -10,7 +13,8 @@ from fastapi.testclient import TestClient
 from pulkovo.config import Config
 from pulkovo.db import Database
 from pulkovo.engine import Engine
-from pulkovo.feedback import Feedback, DELAY, COOLDOWN, QUESTION
+from pulkovo.feedback import Feedback, DELAY, COOLDOWN, QUESTION, survey_keyboard
+from pulkovo.migrations import migrate
 from pulkovo.operator import OperatorInbox, control_label
 from pulkovo.statistics import MOSCOW, automation_summary, feedback_report
 from pulkovo.web import create_app
@@ -58,18 +62,21 @@ class FeedbackFixture(unittest.TestCase):
     def survey(self):
         return self.db.one('SELECT * FROM feedback_surveys ORDER BY id DESC LIMIT 1')
 
-    def send_survey(self):
+    def send_survey(self, *, legacy=False):
         self.message()
+        if legacy:
+            self.db.execute("UPDATE feedback_surveys SET rating_scale='binary',text=? WHERE id=?",
+                ('Как вы оцениваете помощь бота?\n\nВыберите «Хорошо» или «Плохо».', self.survey()['id']))
         self.now += DELAY
         self.assertTrue(self.service.deliver(self.transport, self.engine))
         return self.survey()
 
-    def payload(self, survey=None, rating='good'):
+    def payload(self, survey=None, rating=5):
         return dict(action='feedback', token=(survey or self.survey())['token'], rating=rating)
 
 
 class FeedbackDeliveryTests(FeedbackFixture):
-    def test_sends_after_exactly_one_hour_with_two_inline_buttons(self):
+    def test_sends_after_exactly_one_hour_with_five_inline_buttons(self):
         self.message()
         self.transport.send.reset_mock()
         self.now += DELAY-1
@@ -81,8 +88,10 @@ class FeedbackDeliveryTests(FeedbackFixture):
         self.assertEqual((peer, text, random_id), (11, QUESTION, self.survey()['random_id']))
         keys = json.loads(raw)
         self.assertTrue(keys['inline'])
-        self.assertEqual([b['action']['label'] for b in keys['buttons'][0]], ['Хорошо', 'Плохо'])
-        self.assertEqual(json.loads(keys['buttons'][0][0]['action']['payload']), self.payload())
+        self.assertEqual([b['action']['label'] for b in keys['buttons'][0]], [f'{n} ⭐' for n in range(1, 6)])
+        for n, button in enumerate(keys['buttons'][0], 1):
+            self.assertEqual(button['action']['type'], 'text')
+            self.assertEqual(json.loads(button['action']['payload']), self.payload(rating=n))
         self.assertEqual(self.survey()['vk_message_id'], 12345)
         self.now += COOLDOWN
         self.assertFalse(self.service.deliver(self.transport, self.engine))
@@ -279,6 +288,7 @@ class FeedbackDeliveryTests(FeedbackFixture):
         self.assertFalse(self.engine.receive_reply(message, 'survey-reply'))
         timeline = OperatorInbox(self.db).timeline(11)
         self.assertIn(QUESTION, timeline[-1]['text'])
+        self.assertIn('1 ⭐ · 2 ⭐ · 3 ⭐ · 4 ⭐ · 5 ⭐', timeline[-1]['text'])
         self.assertFalse(self.db.conversation(11)['human_mode'])
 
 
@@ -286,24 +296,26 @@ class FeedbackVoteTests(FeedbackFixture):
     def test_vote_is_local_once_and_excluded_from_automation(self):
         survey = self.send_survey(); self.ai.reset_mock()
         before = automation_summary(self.db, 0, self.now+100)
-        row = self.message('Хорошо', payload=self.payload(survey))
+        row = self.message('5 ⭐', payload=self.payload(survey))
         self.assertEqual((row['outcome'], row['reply']), ('feedback', 'Спасибо за оценку!\n\nЕсли появится новый вопрос, напишите сюда.'))
-        self.assertEqual(self.survey()['rating'], 'good')
-        row = self.message('Плохо', payload=self.payload(survey, 'bad'))
+        self.assertEqual(self.survey()['rating_stars'], 5)
+        self.assertIsNone(self.survey()['rating'])
+        row = self.message('1 ⭐', payload=self.payload(survey, 1))
         self.assertEqual((row['outcome'], row['reply']), ('feedback_duplicate', None))
-        self.assertEqual(self.survey()['rating'], 'good')
+        self.assertEqual(self.survey()['rating_stars'], 5)
         self.assertEqual(self.ai.mock_calls, [])
         self.assertEqual(automation_summary(self.db, 0, self.now+100), before)
         self.assertEqual(self.db.all('SELECT * FROM tickets'), [])
 
     def test_forged_vote_or_wrong_owner_does_not_change_rating(self):
         survey = self.send_survey()
-        for peer, payload in [(12, self.payload()), (11, {'token': 'forged', 'rating': 'bad'}),
-                              (11, self.payload(rating='unknown')), (11, {'token': [], 'rating': 'good'})]:
+        for peer, payload in [(12, self.payload()), (11, {'token': 'forged', 'rating': 1}),
+                              (11, self.payload(rating='unknown')), (11, {'token': [], 'rating': 5})]:
             self.assertEqual(self.service.vote(peer, payload), 'invalid')
         self.assertIsNone(self.survey()['rating'])
+        self.assertIsNone(self.survey()['rating_stars'])
         self.ai.reset_mock()
-        row = self.message('Плохо', payload=dict(action='feedback', token='forged', rating='bad'))
+        row = self.message('1 ⭐', payload=dict(action='feedback', token='forged', rating=1))
         self.assertEqual(row['outcome'], 'feedback_invalid')
         self.ai.route.assert_not_called()
         self.assertFalse(self.db.conversation(11)['human_mode'])
@@ -318,13 +330,13 @@ class FeedbackVoteTests(FeedbackFixture):
         self.db.record_consent(11, 11, 'revoked', 'revoke')
         generation = self.db.conversation(11)['generation']
         self.ai.reset_mock()
-        self.message('Плохо', payload=self.payload(survey, 'bad'))
+        self.message('1 ⭐', payload=self.payload(survey, 1))
         ticket = self.db.one('SELECT * FROM tickets')
         self.assertEqual(ticket['status'], 'waiting_user')
         self.assertEqual(self.db.conversation(11)['generation'], generation)
         self.assertTrue(self.db.conversation(11)['human_mode'])
         self.assertEqual(self.ai.mock_calls, [])
-        self.assertEqual(self.survey()['rating'], 'bad')
+        self.assertEqual(self.survey()['rating_stars'], 1)
 
     def test_vk_history_vote_does_not_reopen_waiting_ticket(self):
         survey = self.send_survey(); self.now += 1
@@ -339,7 +351,7 @@ class FeedbackVoteTests(FeedbackFixture):
 
     def test_late_staff_event_uses_question_instead_of_rating_as_basis(self):
         survey = self.send_survey(); self.now += 60
-        self.message('Плохо', payload=self.payload(survey, 'bad'))
+        self.message('1 ⭐', payload=self.payload(survey, 1))
         self.db.staff_replied(11, 'staff', 99, 2, int(self.now)-30, text='Поможем')
         ticket = self.db.one('SELECT * FROM tickets')
         self.assertEqual(ticket['request_id'], survey['request_id'])
@@ -350,7 +362,7 @@ class FeedbackVoteTests(FeedbackFixture):
         self.now += COOLDOWN
         self.message(); current = self.survey()
         self.now += 600
-        self.message('Хорошо', payload=self.payload(old))
+        self.message('5 ⭐', payload=self.payload(old))
         self.assertEqual(self.survey()['due_at'], current['due_at'])
         self.now = current['due_at']
         self.assertTrue(self.service.deliver(self.transport, self.engine))
@@ -360,9 +372,9 @@ class FeedbackVoteTests(FeedbackFixture):
         self.transport.send.side_effect = RuntimeError('lost response')
         self.service.deliver(self.transport, self.engine)
         self.assertIsNone(self.survey()['sent_at'])
-        self.message('Хорошо', payload=self.payload(), deliver=False)
+        self.message('5 ⭐', payload=self.payload(), deliver=False)
         self.assertEqual(self.survey()['status'], 'sent')
-        self.assertEqual(self.survey()['rating'], 'good')
+        self.assertEqual(self.survey()['rating_stars'], 5)
         for _ in range(3):
             self.engine.deliver(self.transport); self.now += 11
         self.assertEqual(self.db.all('SELECT * FROM tickets'), [])
@@ -370,45 +382,99 @@ class FeedbackVoteTests(FeedbackFixture):
     def test_concurrent_votes_accept_only_first(self):
         self.send_survey()
         with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(lambda rating: self.service.vote(11, self.payload(rating=rating)), ['good', 'bad']))
+            results = list(pool.map(lambda rating: self.service.vote(11, self.payload(rating=rating)), [5, 1]))
         self.assertCountEqual(results, ['accepted', 'duplicate'])
 
     def test_control_label_preserves_button_action_without_saved_text(self):
-        self.assertEqual(control_label(json.dumps(self.payload(self.send_survey(), 'bad'))), 'Оценка «Плохо»')
+        survey = self.send_survey()
+        self.assertEqual(control_label(json.dumps(self.payload(survey, 2))), 'Оценка: 2 из 5 ⭐')
+        row = self.message('', payload=self.payload(survey, 2))
+        item = next(m for m in OperatorInbox(self.db).timeline(11) if m['id'] == f"request-{row['id']}")
+        self.assertEqual(item['text'], 'Оценка: 2 из 5 ⭐')
+
+    def test_all_five_scores_are_saved_and_survive_restart(self):
+        for n in range(1, 6):
+            with self.subTest(rating=n):
+                survey = self.send_survey()
+                self.ai.reset_mock()
+                row = self.message(f'{n} ⭐', payload=self.payload(survey, n))
+                self.assertEqual(row['outcome'], 'feedback')
+                restarted = Database(self.db.path)
+                saved = restarted.one('SELECT * FROM feedback_surveys WHERE id=?', (survey['id'],))
+                self.assertEqual(saved['rating_stars'], n)
+                self.assertIsNone(saved['rating'])
+                self.assertEqual(self.ai.mock_calls, [])
+                self.now += COOLDOWN
+
+    def test_invalid_star_scores_and_wrong_scale_cannot_be_saved(self):
+        self.send_survey()
+        for rating in (0, 6, -1, True, False, 1.0, 2.5, '1.0', ' 5', '05', None, [], {}, 'good', 'bad'):
+            with self.subTest(rating=rating):
+                self.assertEqual(self.service.vote(11, self.payload(rating=rating)), 'invalid')
+        self.assertIsNone(self.survey()['rating_stars'])
+        self.assertEqual(self.service.vote(11, self.payload(rating='4')), 'accepted')
+
+    def test_old_buttons_keep_binary_scale_and_can_still_be_rated(self):
+        survey = self.send_survey(legacy=True)
+        self.assertEqual([b['action']['label'] for b in json.loads(survey_keyboard(survey))['buttons'][0]], ['Хорошо', 'Плохо'])
+        self.assertEqual(self.service.vote(11, self.payload(survey, 5)), 'invalid')
+        self.ai.reset_mock()
+        row = self.message('Хорошо', payload=self.payload(survey, 'good'))
+        self.assertEqual(row['outcome'], 'feedback')
+        self.assertEqual(self.survey()['rating'], 'good')
+        self.assertIsNone(self.survey()['rating_stars'])
+        self.assertEqual(self.service.vote(11, self.payload(survey, 'bad')), 'duplicate')
+        self.assertEqual(self.ai.mock_calls, [])
+        self.assertEqual(control_label(json.dumps(self.payload(survey, 'bad'))), 'Оценка «Плохо»')
+        history = next(m for m in OperatorInbox(self.db).timeline(11) if m['id'] == f"survey-{survey['id']}")
+        self.assertIn('Хорошо · Плохо', history['text'])
+        self.assertNotIn('⭐', history['text'])
 
 
 class FeedbackStatisticsTests(FeedbackFixture):
-    def add_survey(self, sent_at, rating=None):
+    def add_survey(self, sent_at, rating=None, *, legacy=False):
         self.message()
         survey = self.survey()
-        self.db.execute("UPDATE feedback_surveys SET status='sent',sent_at=?,rating=?,rated_at=? WHERE id=?", (sent_at, rating, self.now if rating else None, survey['id']))
+        legacy = legacy or rating in ('good', 'bad')
+        self.db.execute("UPDATE feedback_surveys SET status='sent',sent_at=?,rating=?,rating_stars=?,rating_scale=?,rated_at=? WHERE id=?",
+            (sent_at, rating if legacy else None, None if legacy else rating, 'binary' if legacy else 'stars', self.now if rating else None, survey['id']))
         return survey
 
     def test_weighted_percent_response_rate_days_and_late_votes(self):
         start = datetime(2026, 11, 7, tzinfo=MOSCOW).timestamp()
-        for _ in range(3): self.add_survey(start+1, 'good')
-        self.add_survey(start+86401, 'bad')
+        for _ in range(3): self.add_survey(start+1, 5)
+        self.add_survey(start+86401, 1)
         self.add_survey(start+86402)
-        self.add_survey(start-1, 'bad')
+        self.add_survey(start-1, 1)
         report = feedback_report(self.db, start, self.now)
-        self.assertEqual(report['summary'], dict(sent=5, good=3, bad=1, rated=4, percent=75, response_percent=80))
+        self.assertEqual({key: report['summary'][key] for key in ('sent', 'rated', 'average', 'percent', 'response_percent')},
+            dict(sent=5, rated=4, average=4, percent=75, response_percent=80))
+        self.assertEqual([report['summary'][f'stars_{n}'] for n in range(1, 6)], [1, 0, 0, 0, 3])
         self.assertEqual([row['percent'] for row in report['days']], [0, 100])
         self.assertEqual(len(report['negative']), 1)
         yesterday = feedback_report(self.db, start, start+86400)
-        self.assertEqual(yesterday['summary']['good'], 3)
+        self.assertEqual(yesterday['summary']['stars_5'], 3)
+        self.assertEqual(yesterday['summary']['average'], 5)
         self.assertEqual(len(yesterday['days']), 1)
 
     def test_no_votes_are_not_positive_or_zero_percent(self):
+        self.add_survey(self.now, 'good')
+        self.add_survey(self.now, 'bad')
+        self.add_survey(self.now, legacy=True)
         report = feedback_report(self.db, self.now-86400, self.now+1)
+        self.assertEqual((report['summary']['sent'], report['summary']['rated']), (0, 0))
+        self.assertEqual(report['negative'], [])
         self.assertIsNone(report['summary']['percent'])
         self.assertIsNone(report['summary']['response_percent'])
+        self.assertIsNone(report['summary']['average'])
         self.add_survey(self.now)
         report = feedback_report(self.db, self.now-86400, self.now+1)
         self.assertIsNone(report['summary']['percent'])
         self.assertEqual(report['summary']['response_percent'], 0)
+        self.assertIsNone(report['summary']['average'])
 
     def test_statistics_html_csv_auth_and_safe_negative_reviews(self):
-        survey = self.add_survey(self.now-10, 'bad')
+        survey = self.add_survey(self.now-10, 2)
         self.db.execute('UPDATE requests SET text=?,reply=? WHERE id=?', ('<script>bad()</script>', 'Исторический ответ', survey['request_id']))
         client = authenticated_client(self.cfg, self.db); self.addCleanup(client.close)
         page = client.get('/statistics?period=today')
@@ -418,22 +484,71 @@ class FeedbackStatisticsTests(FeedbackFixture):
         self.assertIn('&lt;script&gt;', page.text)
         self.assertNotIn('<script>bad()', page.text)
         self.assertIn('/dialogue/11', page.text)
-        csv = client.get('/feedback.csv?period=today')
-        self.assertEqual(csv.status_code, 200)
-        self.assertIn('2026-11-08,1,0,1,1,0.0,100.0', csv.text)
+        self.assertIn('Средняя оценка', page.text)
+        self.assertIn('2,00', page.text)
+        self.assertIn('Распределение оценок', page.text)
+        self.assertIn('2 из 5 ⭐', page.text)
+        self.assertNotIn('Прежние оценки «Хорошо / Плохо»', page.text)
+        exported = client.get('/feedback.csv?period=today')
+        self.assertEqual(exported.status_code, 200)
+        values = list(csv.DictReader(io.StringIO(exported.text.lstrip('\ufeff'))))[0]
+        self.assertEqual(values['Дата опроса (Москва)'], '2026-11-08')
+        self.assertEqual(values['2 звезды'], '1')
+        self.assertEqual(values['Средняя оценка из 5'], '2.00')
+        self.assertEqual(values['Доля ответивших на опрос со звездами, %'], '100.0')
+        self.assertFalse(any('Старый формат' in column for column in values))
         self.assertEqual(client.get('/feedback.csv?period=invalid').status_code, 400)
         anonymous = TestClient(create_app(self.cfg, self.db), follow_redirects=False)
         self.addCleanup(anonymous.close)
         self.assertEqual(anonymous.get('/feedback.csv').status_code, 303)
 
     def test_retention_keeps_metrics_without_question_text(self):
-        self.add_survey(self.now, 'bad')
+        self.add_survey(self.now, 1)
         self.now += 31*86400
         self.db.purge()
         report = feedback_report(self.db, 0, self.now)
-        self.assertEqual(report['summary']['bad'], 1)
+        self.assertEqual(report['summary']['stars_1'], 1)
         self.assertEqual(report['negative'][0]['text'], '')
         self.assertIsNone(report['negative'][0]['reply'])
+
+    def test_legacy_votes_are_excluded_from_reports_html_and_csv(self):
+        for score in (1, 2, 3, 4, 5):
+            self.add_survey(self.now-10, score)
+        self.add_survey(self.now-10)
+        before = feedback_report(self.db, self.now-86400, self.now+1)
+        self.add_survey(self.now-10, 'good')
+        self.add_survey(self.now-10, 'good')
+        self.add_survey(self.now-10, 'bad')
+        self.add_survey(self.now-10, legacy=True)
+        report = feedback_report(self.db, self.now-86400, self.now+1)
+        self.assertEqual(report, before)
+        result = report['summary']
+        self.assertEqual((result['sent'], result['rated'], result['average'], result['percent']), (6, 5, 3, 40))
+        self.assertAlmostEqual(result['response_percent'], 100*5/6)
+        self.assertEqual([result[f'stars_{n}'] for n in range(1, 6)], [1]*5)
+        self.assertEqual(self.db.one("SELECT count(*) n FROM feedback_surveys WHERE rating_scale='binary'")['n'], 4)
+        self.assertEqual(len(report['negative']), 2)
+        self.assertEqual({row['rating_stars'] for row in report['negative']}, {1, 2})
+        client = authenticated_client(self.cfg, self.db); self.addCleanup(client.close)
+        page = client.get('/statistics?period=today').text
+        self.assertNotIn('Хорошо', page)
+        self.assertNotIn('Плохо', page)
+        exported = client.get('/feedback.csv?period=today').text
+        row = list(csv.DictReader(io.StringIO(exported.lstrip('\ufeff'))))[0]
+        self.assertEqual(row['Средняя оценка из 5'], '3.00')
+        self.assertEqual(row['Отправлено опросов со звездами'], '6')
+        self.assertEqual(row['Всего оценок со звездами'], '5')
+        self.assertNotIn('Хорошо', exported)
+        self.assertNotIn('Плохо', exported)
+        self.assertNotIn('Старый формат', exported)
+
+    def test_late_vote_updates_invitation_day_and_period_end_is_exclusive(self):
+        start = datetime(2026, 11, 7, tzinfo=MOSCOW).timestamp()
+        old = self.add_survey(start+10)
+        self.add_survey(start+86400, 1)
+        self.assertEqual(self.service.vote(11, self.payload(old, 4)), 'accepted')
+        result = feedback_report(self.db, start, start+86400)['summary']
+        self.assertEqual((result['sent'], result['rated'], result['average']), (1, 1, 4))
 
     def test_setting_form_can_disable_and_enable_surveys(self):
         self.message()
@@ -444,6 +559,70 @@ class FeedbackStatisticsTests(FeedbackFixture):
         self.assertEqual(self.survey()['status'], 'cancelled')
         client.post('/settings', data={'csrf': 'test', 'consent_ready': 'on', 'feedback_enabled': 'on'})
         self.assertEqual(self.db.setting('feedback_enabled'), 'true')
+
+
+class FeedbackMigrationTests(unittest.TestCase):
+    def test_upgrade_preserves_votes_and_uncertain_deliveries_and_converts_unsent_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            old_sql = folder/'old-sql'; old_sql.mkdir()
+            for path in (Path(__file__).parent.parent/'pulkovo/sql').glob('*.sql'):
+                if path.name < '014':
+                    (old_sql/path.name).write_bytes(path.read_bytes())
+            db_path = folder/'old.sqlite3'
+            migrate(db_path, old_sql)
+            # Each active survey belongs to a different user, as in production.
+            cases = [
+                ('sent', 1, 100, 100, 'good'),
+                ('sent', 1, 100, 100, None),
+                ('pending', 0, None, None, None),
+                ('pending', 1, 100, None, None),
+                ('sending', 1, 100, None, None),
+                ('failed', 3, 100, None, None),
+                ('cancelled', 0, None, None, None),
+                ('sent', 1, 100, 100, 'bad'),
+            ]
+            old_text = 'Как вы оцениваете помощь бота?\n\nВыберите «Хорошо» или «Плохо».'
+            con = sqlite3.connect(db_path)
+            try:
+                with con:
+                    for ident, (status, attempts, attempted, sent, rating) in enumerate(cases, 1):
+                        con.execute('INSERT INTO conversations(peer_id,user_id,updated_at) VALUES (?,?,100)', (ident, ident))
+                        con.execute("INSERT INTO requests(id,event_key,peer_id,user_id,input_type,random_id,created_at,updated_at) VALUES (?,?,?,?,'text',?,100,100)", (ident, f'question-{ident}', ident, ident, ident))
+                        con.execute("""INSERT INTO feedback_surveys
+                            (id,peer_id,request_id,generation,activity_request_id,last_activity_at,due_at,token,random_id,text,status,
+                             attempts,attempted_at,sent_at,rating,rated_at,created_at,updated_at)
+                            VALUES (?,?,?,0,?,100,3700,?,?,?,?,?,?,?,?,?,100,100)""",
+                            (ident, ident, ident, ident, f'token-{ident}', 100+ident, old_text, status, attempts, attempted, sent, rating, 120 if rating else None))
+            finally:
+                con.close()
+            db = Database(db_path)
+            self.assertEqual(migrate(db_path), [])
+            self.assertTrue(list((folder/'backups').glob('*.sqlite3')))
+            self.assertEqual(db.all('PRAGMA foreign_key_check'), [])
+            for ident, case in enumerate(cases, 1):
+                row = db.one('SELECT * FROM feedback_surveys WHERE id=?', (ident,))
+                self.assertEqual((row['status'], row['attempts'], row['attempted_at'], row['sent_at'], row['rating']), case)
+                self.assertEqual((row['token'], row['random_id']), (f'token-{ident}', 100+ident))
+                self.assertIsNone(row['rating_stars'])
+                self.assertEqual(row['rating_scale'], 'stars' if ident == 3 else 'binary')
+                self.assertEqual(row['text'], QUESTION if ident == 3 else old_text)
+            service = Feedback(db)
+            self.assertEqual(service.vote(2, dict(token='token-2', rating='bad')), 'accepted')
+            self.assertEqual(service.vote(1, dict(token='token-1', rating='bad')), 'duplicate')
+            # A click can confirm an old delivery whose API response was lost.
+            self.assertEqual(service.vote(4, dict(token='token-4', rating='good')), 'accepted')
+            self.assertEqual(db.one('SELECT rating FROM feedback_surveys WHERE id=4')['rating'], 'good')
+            self.assertEqual(service.vote(3, dict(token='token-3', rating=5)), 'invalid')
+            db.execute("UPDATE feedback_surveys SET sent_at=200,status='sent' WHERE id=3")
+            self.assertEqual(service.vote(3, dict(token='token-3', rating=5)), 'accepted')
+            for sql in ("UPDATE feedback_surveys SET rating_stars=0 WHERE id=3",
+                        "UPDATE feedback_surveys SET rating_stars=6 WHERE id=3",
+                        "UPDATE feedback_surveys SET rating_stars=1.5 WHERE id=3",
+                        "UPDATE feedback_surveys SET rating='good' WHERE id=3",
+                        "UPDATE feedback_surveys SET rating_stars=5 WHERE id=1"):
+                with self.subTest(sql=sql), self.assertRaises(sqlite3.IntegrityError):
+                    db.execute(sql)
 
 
 if __name__ == '__main__':

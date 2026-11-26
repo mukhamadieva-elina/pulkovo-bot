@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 import truststore
 import urllib3
 
+from .flight_cities import city_matches, parse_city_query
+
 MOSCOW = ZoneInfo('Europe/Moscow')
 BASE = 'https://pulkovoairport.ru'
 CACHE_SECONDS = 60
@@ -234,12 +236,18 @@ def parse_query(text, previous=None, *, now=None):
         r'(?:другой|новый|еще(?:\s+один)?)\s+рейс(?:\s+пожалуйста)?', reset_text))
     if new_search:
         live, previous = True, None
+    if not numbers and not new_search:
+        city_query = parse_city_query(text, rest, day, invalid, previous)
+        if city_query is not None:
+            return city_query
     bare = re.sub(r'[\W_]+', ' ', NUMBER.sub(' ', rest)).strip()
     bare = re.sub(r'\b(?:рейс|на|пожалуйста|подскажите|проверь|проверьте|а|за|дата|прилет|вылет)\b', '', bare).strip()
     continuation = previous and (live or not bare) and (day or invalid or numbers or re.search(r'прилет|вылет|гейт|выход|статус|стойк|лент|обнови', text))
     if not (live or numbers and not bare or continuation):
         return None
     query = {'new_search': True} if new_search else dict(previous) if continuation else {}
+    if query.get('mode') == 'city':
+        query = {key: query[key] for key in ('date', 'direction') if key in query}
     # A new flight starts with its own date; never inherit the old flight's date silently.
     if numbers and query.get('number') and query['number'] not in numbers:
         query = {}
@@ -327,6 +335,8 @@ def answer_query(query, board=SHARED_BOARD, *, now=None):
     error = query.pop('error', '')
     if error:
         return FlightReply(query, error)
+    if query.get('mode') == 'city':
+        return answer_city_query(query, board, now=now)
     if not query.get('number'):
         if query.get('new_search'):
             if query.get('date'):
@@ -355,6 +365,105 @@ def answer_query(query, board=SHARED_BOARD, *, now=None):
         return FlightReply(query, 'На эту дату есть несколько совпадений:\n'+choices+'\n\nУточните: прилет или вылет. Если совпадений несколько в одном направлении, проверьте нужный рейс на табло.\n'+board_links())
     query['direction'] = matches[0].direction
     return FlightReply(query, format_flight(matches[0], query['number']), 'answer', 'flight_board', min(deadlines))
+
+
+def flight_time(flight):
+    if flight.actual:
+        return flight.actual
+    if flight.estimated and (flight.status != 'Задержан' or flight.estimated > flight.scheduled):
+        return flight.estimated
+    return None if flight.status == 'Задержан' else flight.scheduled
+
+
+def city_flight_line(flight):
+    when = flight_time(flight)
+    if flight.status == 'Отмена':
+        detail = f'{flight.scheduled:%d.%m %H:%M} по расписанию · отменен'
+    elif when is None:
+        detail = f'задержан, новое время не указано · по расписанию {flight.scheduled:%d.%m %H:%M}'
+    else:
+        timing = 'фактически' if flight.actual else 'ожидается' if flight.estimated and flight.estimated != flight.scheduled else 'по расписанию'
+        detail = f'{when:%d.%m %H:%M} {timing}'
+        if flight.status.lower() != timing:
+            detail += f' · {flight.status.lower()}'
+        if flight.status == 'Задержан':
+            detail += f' (по расписанию {flight.scheduled:%d.%m %H:%M})'
+    return f'✈ {flight.number} · {flight.city}\n{detail}'
+
+
+def answer_city_query(query, board, *, now):
+    city = query.get('city')
+    if not city:
+        return FlightReply(query, 'В какой город ищете вылет или из какого города ожидаете прилет? Например: ближайший рейс в Красноярск.')
+    direction = query.get('direction')
+    if not direction:
+        return FlightReply(query, f'Город: {city.capitalize()}. Вас интересует вылет из Пулково или прилет в Пулково? Напишите «вылет» или «прилет».')
+    nearest = query.get('nearest', False)
+    today = datetime.fromtimestamp(now, MOSCOW).date()
+    if not query.get('date') and not nearest:
+        return FlightReply(query, 'На какую дату посмотреть рейсы по этому направлению? Напишите «сегодня», «завтра» или дату по расписанию в Пулково.')
+    days = [date.fromisoformat(query['date'])] if query.get('date') else [today+timedelta(days=n) for n in (-1,0,1,2)]
+    if any((day-today).days not in (-1,0,1,2) for day in days):
+        return FlightReply(query, 'В табло доступны вчера, сегодня, завтра и послезавтра. Для другой даты проверьте расписание у авиакомпании.\n\n'+board_links(), 'flight_info', 'flight_outside_board')
+    flights, deadlines, missing = [], [], []
+    for day in days:
+        try:
+            rows, deadline = board.get(direction, day)
+        except BoardUnavailable:
+            missing.append(day)
+            continue
+        deadlines.append(deadline)
+        flights.extend(f for f in rows if f.direction==direction and f.scheduled.date()==day and city_matches(city, f.city))
+    # Codeshares in one row and duplicate source rows must not inflate results.
+    unique = {}
+    for flight in flights:
+        key = (normalize_number(flight.number), flight.scheduled, flight.city)
+        if key not in unique or flight.updated > unique[key].updated:
+            unique[key] = flight
+    flights = list(unique.values())
+    display_city = re.sub(r'\s*\([^)]*\)', '', flights[0].city) if flights else city.capitalize()
+    uncertain = []
+    if nearest:
+        upcoming = []
+        for flight in flights:
+            if flight.actual or flight.offblock or flight.status in ('Отмена', 'Вылетел', 'Прибыл', 'Отправлен со стоянки'):
+                continue
+            when = flight_time(flight)
+            if when is None or when.timestamp() < now:
+                # The source has not confirmed departure/arrival, but its time
+                # is already in the past. Do not silently call another flight nearest.
+                uncertain.append(flight)
+            else:
+                upcoming.append(flight)
+        flights = sorted(upcoming, key=lambda f: (flight_time(f), f.scheduled, f.number))
+    else:
+        flights.sort(key=lambda f: (f.scheduled, f.number))
+    link = f'Табло: {BASE}/passengers/{direction}/'
+    scope = f'на {days[0]:%d.%m.%Y}' if query.get('date') else f'сейчас и до {(today+timedelta(days=2)):%d.%m.%Y}'
+    route = f'Пулково → {display_city}' if direction=='departure' else f'{display_city} → Пулково'
+    deadline = min(deadlines) if deadlines else None
+    if not flights and not uncertain:
+        if missing:
+            text = 'Сейчас не удалось получить все свежие данные табло. Нельзя подтвердить наличие рейсов по этому направлению. Попробуйте позже.\n\n'+link
+            return FlightReply(query, text, 'flight_info', 'flight_unavailable', deadline)
+        qualifier = 'предстоящих рейсов' if nearest else 'рейсов'
+        return FlightReply(query, f'По направлению {route} не нашел {qualifier} {scope} в доступных данных табло. Это не означает, что такого маршрута нет.\n\n'+link, 'flight_info', 'flight_not_found', deadline)
+    title = 'Ближайшие рейсы по табло' if nearest and not (missing or uncertain) else 'Рейсы по табло'
+    lines = [f'{title}: {route}', scope.capitalize(), '']
+    lines.extend(city_flight_line(f)+'\n' for f in flights[:3])
+    if len(flights)>3:
+        lines.append(f'Показаны 3 из {len(flights)} найденных рейсов. Остальные доступны на табло.')
+    if uncertain:
+        lines.append('Есть рейсы без подтвержденного будущего времени. Однозначно определить ближайший рейс нельзя:')
+        for flight in sorted(uncertain, key=lambda f: f.scheduled)[:2]:
+            lines.append(city_flight_line(flight))
+        if len(uncertain)>2:
+            lines.append(f'Еще рейсов с неуточненным временем: {len(uncertain)-2}. См. табло.')
+    if missing:
+        lines.append('Часть табло недоступна ('+', '.join(d.strftime('%d.%m') for d in missing)+'). Список может быть неполным; ближайший рейс не подтвержден.')
+    lines += ['', 'Время московское. Данные могут измениться.', 'Для выхода, стоек или багажной ленты напишите номер рейса и дату.', link]
+    partial = bool(missing or nearest and uncertain)
+    return FlightReply(query, '\n'.join(lines), 'flight_info' if partial else 'answer', 'flight_partial' if partial else 'flight_board', deadline)
 
 
 def previous_query(db, request, generation):

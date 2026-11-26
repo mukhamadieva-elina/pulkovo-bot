@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import time
-from .feedback import cancel_pending, message_random_id
+from .feedback import cancel_pending, message_random_id, star_rating, survey_options
 from .sessions import ensure_session, CLOSURE_LABELS
 
 
@@ -16,12 +16,15 @@ def control_label(payload):
     if not isinstance(data,dict) or not isinstance(data.get('action'),str):
         return ''
     if data['action']=='feedback':
+        stars=star_rating(data.get('rating'))
+        if stars is not None:
+            return f'Оценка: {stars} из 5 ⭐'
         return 'Оценка «Хорошо»' if data.get('rating')=='good' else 'Оценка «Плохо»' if data.get('rating')=='bad' else 'Оценка помощи бота'
     if data['action']=='agree' and data.get('source')=='text':
         return 'Согласие отправлено текстом'
     return {
         'agree':'Выбрано «Согласен»',
-        'decline':'Выбрано «Без ИИ — к сотруднику»',
+        'decline':'Выбрано общение с сотрудником',
         'operator':'Запрос помощи сотрудника',
         'revoke':'Запрос на отзыв согласия',
     }.get(data['action'],'')
@@ -39,12 +42,12 @@ class OperatorInbox:
         for query in (
             "SELECT human_mode,generation,bot_paused_until,bot_paused_until>CAST(strftime('%s','now') AS REAL) FROM conversations WHERE peer_id=?",
             'SELECT reason,count,last_at FROM protection_events WHERE peer_id=? ORDER BY reason',
-            'SELECT id,status,assigned_to,note,topic_version,auto_close_paused,closure_reason,last_staff_reply_at FROM tickets WHERE peer_id=? ORDER BY id',
+            'SELECT id,status,note,topic_version,auto_close_paused,closure_reason,last_staff_reply_at FROM tickets WHERE peer_id=? ORDER BY id',
             'SELECT p.updated_at FROM conversations c LEFT JOIN vk_profiles p ON p.user_id=c.user_id WHERE c.peer_id=?',
             'SELECT id,status,updated_at FROM requests WHERE peer_id=? ORDER BY id DESC LIMIT 100',
             'SELECT id,updated_at FROM staff_replies WHERE peer_id=? ORDER BY id DESC LIMIT 100',
             'SELECT id,status,updated_at FROM operator_outbox WHERE peer_id=? ORDER BY id DESC LIMIT 100',
-            'SELECT id,status,rating,updated_at FROM feedback_surveys WHERE peer_id=? ORDER BY id DESC LIMIT 100',
+            'SELECT id,status,rating,rating_stars,updated_at FROM feedback_surveys WHERE peer_id=? ORDER BY id DESC LIMIT 100',
             'SELECT id,last_activity_at,closed_at,closure_reason FROM dialogue_sessions WHERE peer_id=? ORDER BY id DESC LIMIT 100',
         ):
             parts.append([tuple(row) for row in con.execute(query,(peer_id,))])
@@ -76,10 +79,9 @@ class OperatorInbox:
             con.execute("INSERT OR IGNORE INTO tickets(peer_id,request_id,reason,status,created_at) VALUES (?,?,'staff_joined','open',?)",(peer_id,latest['id'],now))
             ticket=con.execute("SELECT * FROM tickets WHERE peer_id=? AND status IN ('open','waiting_user')",(peer_id,)).fetchone()
             self.db._refresh_ticket_topics(con,peer_id)
-            con.execute("UPDATE tickets SET assigned_to=CASE WHEN assigned_to='' THEN ? ELSE assigned_to END,taken_at=coalesce(taken_at,?) WHERE id=?",(name,now,ticket['id']))
             con.execute('UPDATE conversations SET human_mode=1,generation=generation+1,updated_at=? WHERE peer_id=?',(now,peer_id))
             cancel_pending(con,peer_id,'staff_joined')
-            con.execute("UPDATE requests SET status='cancelled',reason='staff_joined',reply=NULL WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','flight_info')",(peer_id,))
+            con.execute("UPDATE requests SET status='cancelled',reason='staff_joined',reply=NULL WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','farewell','flight_info')",(peer_id,))
             random_id=message_random_id(con)
             row=con.execute('INSERT INTO operator_outbox(client_key,peer_id,ticket_id,basis_request_id,text,staff_name,random_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',(client_key,peer_id,ticket['id'],latest['id'],text,name,random_id,now,now))
             con.execute("INSERT INTO audit(action,target,created_at) VALUES ('operator_reply_queued',?,?)",(str(row.lastrowid),now))
@@ -177,7 +179,8 @@ class OperatorInbox:
             result.append(dict(id=f"outbox-{row['id']}",author=row['staff_name'],kind='staff',text=row['text'],attachments=[],created_at=row['created_at'],status=row['status'],outbox_id=row['id'],error=row['error'],cmid=0))
         survey_bounds=' AND sent_at>? AND sent_at<=?' if ticket_id is not None else ''
         for row in self.db.all("SELECT * FROM feedback_surveys WHERE peer_id=? AND sent_at IS NOT NULL"+survey_bounds+' ORDER BY sent_at DESC LIMIT 30',params):
-            result.append(dict(id=f"survey-{row['id']}",author='Бот',kind='bot',text=row['text']+'\nХорошо · Плохо',attachments=[],created_at=row['sent_at'],status='sent',cmid=0))
+            buttons=' · '.join(label for label, _, _ in survey_options(row))
+            result.append(dict(id=f"survey-{row['id']}",author='Бот',kind='bot',text=row['text']+'\n'+buttons,attachments=[],created_at=row['sent_at'],status='sent',cmid=0))
         visible=sorted(result,key=lambda m:(m['created_at'],m['cmid']))[-limit:]
         if not visible or ticket_id is not None or not include_sessions:
             return visible

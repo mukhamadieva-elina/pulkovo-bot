@@ -83,7 +83,7 @@ class RoutingTests(unittest.TestCase):
     def test_followup_receives_recent_answer_but_not_feedback_or_staff_messages(self):
         first=self.message('Где можно сесть?');self.engine.deliver(self.transport)
         self.message('А на первом этаже?',self.decision('clarify'))
-        self.assertEqual(self.ai.route.call_args.args[2],[{'text':first['text'],'reply':first['reply']}])
+        self.assertEqual(self.ai.route.call_args.args[2],[{'text':first['text'],'reply':'Зоны ожидания есть на первом и втором этажах.'}])
         self.engine.deliver(self.transport)
         self.db.execute('UPDATE requests SET updated_at=?',(time.time()-1801,))
         self.assertEqual(self.db.history(11),[])

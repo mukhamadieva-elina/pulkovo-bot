@@ -89,7 +89,7 @@ class SystemTests(unittest.TestCase):
     def test_migrations_idempotent(self):
         self.card()
         Database(self.path)
-        self.assertEqual(len(self.db.all("SELECT * FROM schema_migrations")),13)
+        self.assertEqual(len(self.db.all("SELECT * FROM schema_migrations")),15)
         self.assertEqual(len(self.db.cards()),1)
 
     def test_upgrade_preserves_data_and_backs_up(self):
@@ -257,7 +257,7 @@ class SystemTests(unittest.TestCase):
         row=self.message()
         self.assertEqual(row["outcome"],"answer")
         self.assertEqual(row["status"],"ready")
-        self.assertEqual(row["reply"],"Инструкция по оплате парковки.")
+        self.assertEqual(row["reply"],self.db.setting('session_intro')+'\n\nИнструкция по оплате парковки.')
         self.engine.deliver(Transport())
         self.assertEqual(self.db.one("SELECT status FROM requests WHERE id=?",(row["id"],))["status"],"sent")
 
@@ -642,10 +642,17 @@ class SystemTests(unittest.TestCase):
         client=authenticated_client(self.cfg,self.db)
         page=client.get("/queue")
         self.assertIn(b"gim123?sel=11",page.content)
+        self.assertNotIn('ответственный',page.text.lower())
+        self.assertNotIn('Не назначен',page.text)
+        dialogue=client.get('/dialogue/11').text
+        self.assertNotIn('Ответственный',dialogue)
+        self.assertNotIn('Взять диалог себе',dialogue)
+        self.assertNotIn('name="staff_name"',dialogue)
         from pulkovo.operator import OperatorInbox
         revision=OperatorInbox(self.db).revision(11)
         client.post("/dialogue/11",data={"csrf":"test","action":"take","staff_name":"Тест","revision":revision})
-        self.assertEqual(self.db.all("SELECT * FROM tickets")[0]["assigned_to"],"Тест")
+        self.assertTrue(self.db.conversation(11)["human_mode"])
+        self.assertEqual(self.db.one('SELECT status FROM tickets')['status'],'open')
         client.post("/dialogue/11",data={"csrf":"test","action":"resume","revision":OperatorInbox(self.db).revision(11)})
         self.assertFalse(self.db.conversation(11)["human_mode"])
 

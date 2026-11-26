@@ -1,7 +1,8 @@
 import json
 
 from test_feedback import FeedbackFixture
-from pulkovo.consent import INTRODUCTION, is_typed_consent
+from pulkovo.consent import INTRODUCTION, DEFAULT_CONSENT_TEXT, is_typed_consent, consent_message
+from web_client import authenticated_client
 
 
 class TypedConsentTests(FeedbackFixture):
@@ -16,11 +17,35 @@ class TypedConsentTests(FeedbackFixture):
         for text in ('не согласен','да','Ок','согласен, но не на ИИ','согласен где парковка','согласен?', 'согласен '*100):
             self.assertFalse(is_typed_consent(text))
 
+    def test_session_intro_can_be_edited_without_removing_conditions(self):
+        client=authenticated_client(self.cfg,self.db)
+        self.addCleanup(client.close)
+        intro='Помогу разобраться с вашим вопросом.'
+        client.post('/settings',data={'csrf':'test','consent_ready':'on','session_intro':intro})
+        first=consent_message(self.db.settings())
+        self.assertNotIn(intro,first)
+        self.assertTrue(consent_message(self.db.settings(),include_intro=True).startswith(intro))
+        self.assertIn(DEFAULT_CONSENT_TEXT,first)
+        version=self.db.setting('consent_version')
+        self.assertEqual(version,'v1')
+        self.assertIn(first,client.get('/settings').text)
+        self.assertNotIn('GigaChat',first)
+        self.assertNotIn('ИИ',first)
+
+    def test_invalid_greeting_settings_do_not_replace_current_texts(self):
+        client=authenticated_client(self.cfg,self.db)
+        self.addCleanup(client.close)
+        before=self.db.settings()
+        for values in ({'session_intro':''},{'session_intro':'x'*301}):
+            client.post('/settings',data={'csrf':'test','consent_ready':'on',**values})
+            self.assertEqual(self.db.settings(),before)
+
     def test_delivered_offer_accepts_text_and_records_exact_shown_conditions(self):
+        self.db.set_settings({'consent_text':'Здравствуйте!\n\n'+DEFAULT_CONSENT_TEXT})
         offer=self.message('Привет')
         self.assertIn(INTRODUCTION,offer['reply'])
         self.assertIn('Согласна',offer['reply'])
-        self.assertNotIn('Здравствуйте!',offer['reply'])
+        self.assertEqual(offer['reply'].count('Здравствуйте!'),1)
         self.assertTrue(self.db.setting('consent_text').startswith('Здравствуйте!'))
         accepted=self.message('Согласна!')
         self.assertEqual(accepted['outcome'],'consent_accepted')
@@ -39,11 +64,12 @@ class TypedConsentTests(FeedbackFixture):
         self.assertFalse(self.db.allowed(11))
         self.ai.route.assert_not_called()
 
-    def test_first_thanks_also_shows_introduction_to_new_user(self):
+    def test_first_thanks_requests_consent_without_greeting_new_user(self):
+        self.db.execute('DELETE FROM consent_events WHERE peer_id=11')
         self.db.execute("UPDATE conversations SET consent_state='unknown' WHERE peer_id=11")
         row=self.message('Спасибо')
         self.assertEqual(row['outcome'],'consent_required')
-        self.assertIn(INTRODUCTION,row['reply'])
+        self.assertNotIn(INTRODUCTION,row['reply'])
 
     def test_ready_and_failed_offer_are_not_proof_of_delivery(self):
         self.message('Привет',deliver=False)

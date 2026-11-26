@@ -17,6 +17,7 @@ from itsdangerous import TimestampSigner
 from openpyxl import load_workbook
 
 from pulkovo.config import Config
+from pulkovo.consent import consent_message
 from pulkovo.db import Database
 from pulkovo.importer import template_workbook
 from pulkovo.web import create_app
@@ -78,14 +79,16 @@ class FastAPIWebTests(unittest.TestCase):
         for path in ('/','/cards','/resources','/queue/state','/dialogue/11/updates','/statistics.csv','/automation.csv','/tickets.csv','/import/template.xlsx','/settings'):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code,303)
-        for path in ('/logout','/settings','/import/commit','/cards/new','/resources','/dialogue/11'):
+        for path in ('/logout','/settings','/settings/consent-preview','/import/commit','/cards/new','/resources','/dialogue/11'):
             self.assertEqual(self.client.post(path,data={}).status_code,400)
+        token=csrf(self.client.get('/login').text)
+        self.assertEqual(self.client.post('/settings/consent-preview',data={'csrf':token}).status_code,303)
         self.assertEqual(self.client.get('/docs').status_code,404)
         self.assertEqual(self.client.get('/openapi.json').status_code,404)
 
     def test_templates_assets_and_security_headers_remain_available(self):
         self.login()
-        for path in ('/','/cards/new','/resources','/queue?state=all','/statistics','/settings','/import','/preview','/static/app.css','/static/dialogue.js'):
+        for path in ('/','/cards/new','/resources','/queue?state=all','/statistics','/settings','/import','/preview','/static/app.css','/static/dialogue.js','/static/settings.js'):
             with self.subTest(path=path):
                 result=self.client.get(path)
                 self.assertEqual(result.status_code,200)
@@ -95,6 +98,36 @@ class FastAPIWebTests(unittest.TestCase):
                 self.assertIn("form-action 'self'",result.headers['content-security-policy'])
         self.assertIn('class="active" href="/queue"',self.client.get('/queue').text)
         self.assertIn('text/css',self.client.get('/static/app.css').headers['content-type'])
+
+    def test_consent_preview_shows_saved_text_and_unsaved_draft_without_saving(self):
+        self.login()
+        page=self.client.get('/settings').text
+        before=self.db.settings()
+        initial=re.search(r'<p[^>]*data-consent-preview>(.*?)</p>',page,re.S)[1]
+        self.assertEqual(html.unescape(initial),consent_message(before))
+        self.assertNotIn(before['session_intro'],html.unescape(initial))
+        intro_preview=re.search(r'<p[^>]*data-session-intro-preview>(.*?)</p>',page,re.S)[1]
+        self.assertEqual(html.unescape(intro_preview),before['session_intro'])
+        draft=dict(session_intro='Здравствуйте! ✈\nНовое приветствие.',
+            consent_text='Условия обработки <данных>.',consent_url='https://airport.example/terms')
+        response=self.client.post('/settings/consent-preview',data={'csrf':csrf(page),**draft})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json(),dict(text=consent_message(before|draft),session_intro=draft['session_intro'],warning=''))
+        self.assertNotIn(draft['session_intro'],response.json()['text'])
+        self.assertEqual(self.db.settings(),before)
+        self.assertFalse(self.db.all("SELECT * FROM audit WHERE action='settings_changed'"))
+
+    def test_consent_preview_warns_about_invalid_drafts(self):
+        self.login()
+        token=csrf(self.client.get('/settings').text)
+        before=self.db.settings()
+        for draft in ({'consent_text':'x'*3600},{'consent_url':'http://airport.example/terms'}):
+            response=self.client.post('/settings/consent-preview',data={'csrf':token,**draft})
+            self.assertEqual(response.status_code,200)
+            self.assertTrue(response.json()['warning'])
+        response=self.client.post('/settings/consent-preview',data={'csrf':token,'consent_text':'x'*10001})
+        self.assertEqual(response.status_code,400)
+        self.assertEqual(self.db.settings(),before)
 
     def test_multipart_excel_preview_commit_and_repeat_import(self):
         self.login()

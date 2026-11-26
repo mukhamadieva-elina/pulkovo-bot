@@ -68,7 +68,7 @@ _RESULTS = """
         FROM requests r LEFT JOIN handed h ON h.request_id=r.id
         WHERE r.created_at>=? AND r.created_at<?
           AND coalesce(r.outcome,'') NOT IN
-              ('thanks','greeting','consent_required','consent_accepted','consent_revoked')
+              ('thanks','greeting','farewell','consent_required','consent_accepted','consent_revoked')
           AND coalesce(r.reason,'')!='consent_declined'
           AND coalesce(r.outcome,'') NOT LIKE 'feedback%'
           AND coalesce(json_extract(
@@ -116,8 +116,10 @@ def automation_report(db, since, until):
 
 
 def feedback_percent(row):
-    row['rated'] = row['good'] + row['bad']
-    row['percent'] = 100 * row['good'] / row['rated'] if row['rated'] else None
+    row['rated'] = sum(row[f'stars_{n}'] for n in range(1, 6))
+    row['average'] = sum(n * row[f'stars_{n}'] for n in range(1, 6)) / row['rated'] if row['rated'] else None
+    row['positive'] = row['stars_4'] + row['stars_5']
+    row['percent'] = 100 * row['positive'] / row['rated'] if row['rated'] else None
     row['response_percent'] = 100 * row['rated'] / row['sent'] if row['sent'] else None
     return row
 
@@ -127,10 +129,13 @@ def feedback_report(db, since, until):
     with db.connect() as con:
         con.create_function('moscow_day', 1, lambda value: datetime.fromtimestamp(value, MOSCOW).date().isoformat(), deterministic=True)
         found = con.execute("""SELECT moscow_day(sent_at) day, count(*) sent,
-            coalesce(sum(rating='good'),0) good, coalesce(sum(rating='bad'),0) bad
-            FROM feedback_surveys WHERE sent_at>=? AND sent_at<? GROUP BY day""", (since, until)).fetchall()
+            coalesce(sum(rating_stars=1),0) stars_1, coalesce(sum(rating_stars=2),0) stars_2,
+            coalesce(sum(rating_stars=3),0) stars_3, coalesce(sum(rating_stars=4),0) stars_4,
+            coalesce(sum(rating_stars=5),0) stars_5
+            FROM feedback_surveys WHERE rating_scale='stars' AND sent_at>=? AND sent_at<? GROUP BY day""", (since, until)).fetchall()
     by_day = {row['day']: dict(row) for row in found}
-    totals = dict(sent=0, good=0, bad=0)
+    empty = dict(sent=0, stars_1=0, stars_2=0, stars_3=0, stars_4=0, stars_5=0)
+    totals = empty.copy()
     for row in by_day.values():
         for key in totals:
             totals[key] += row[key]
@@ -139,15 +144,15 @@ def feedback_report(db, since, until):
     last = end.date()-timedelta(days=1) if end.time() == time.min and end > first else end.date()
     day, rows = first.date(), []
     while day <= last:
-        row = by_day.get(day.isoformat(), dict(day=day.isoformat(), sent=0, good=0, bad=0))
+        row = by_day.get(day.isoformat(), dict(day=day.isoformat(), **empty))
         row['label'] = day.strftime('%d.%m.%Y')
         rows.append(feedback_percent(row))
         day += timedelta(days=1)
-    negative = db.all("""SELECT s.peer_id,s.sent_at,s.rated_at,r.text,r.reply,r.topic,
+    negative = db.all("""SELECT s.peer_id,s.sent_at,s.rated_at,s.rating_stars,r.text,r.reply,r.topic,
         trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')) user_name
         FROM feedback_surveys s JOIN requests r ON r.id=s.request_id
         JOIN conversations c ON c.peer_id=s.peer_id
         LEFT JOIN vk_profiles p ON p.user_id=c.user_id
-        WHERE s.sent_at>=? AND s.sent_at<? AND s.rating='bad'
+        WHERE s.rating_scale='stars' AND s.sent_at>=? AND s.sent_at<? AND s.rating_stars IN (1,2)
         ORDER BY s.rated_at DESC,s.id DESC LIMIT 10""", (since, until))
     return dict(summary=feedback_percent(totals), days=list(reversed(rows)), negative=negative)

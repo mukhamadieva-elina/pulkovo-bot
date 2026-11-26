@@ -1,18 +1,22 @@
+{% macro percent(value) %}{{('%.1f'|format(value)).replace('.', ',') ~ '%' if value is not none else '—'}}{% endmacro %}
+{% macro average(value) %}{{('%.2f'|format(value)).replace('.', ',') if value is not none else '—'}}{% endmacro %}
 <section class="panel">
 <div class="section-head"><h2>Оценки помощи бота</h2><a class="button" href="/feedback.csv?{{period.query}}">Скачать оценки CSV</a></div>
 <p class="small muted">Опросы, отправленные за выбранный период. Ответы на них учитываются и после окончания периода.</p>
 <div class="metrics">
-<div class="metric"><span>Доля оценок «Хорошо»</span><strong>{{('%.1f'|format(feedback.summary.percent)).replace('.', ',') ~ '%' if feedback.summary.percent is not none else '—'}}</strong><small>{% if feedback.summary.rated %}{{feedback.summary.good}} из {{feedback.summary.rated}} оценок{% else %}Оценок пока нет{% endif %}</small></div>
-<div class="metric"><span>Хорошо / Плохо</span><strong>{{feedback.summary.good}} / {{feedback.summary.bad}}</strong><small>Каждый опрос можно оценить один раз</small></div>
-<div class="metric"><span>Ответили на опрос</span><strong>{{('%.1f'|format(feedback.summary.response_percent)).replace('.', ',') ~ '%' if feedback.summary.response_percent is not none else '—'}}</strong><small>{{feedback.summary.rated}} из {{feedback.summary.sent}} отправленных опросов</small></div>
+<div class="metric"><span>Средняя оценка</span><strong>{{average(feedback.summary.average)}}</strong><small>{% if feedback.summary.rated %}Из 5 звезд · оценок: {{feedback.summary.rated}}{% else %}Оценок со звездами пока нет{% endif %}</small></div>
+<div class="metric"><span>Оценили на 4 или 5</span><strong>{{percent(feedback.summary.percent)}}</strong><small>{{feedback.summary.positive}} из {{feedback.summary.rated}} оценок</small></div>
+<div class="metric"><span>Ответили на опрос</span><strong>{{percent(feedback.summary.response_percent)}}</strong><small>{{feedback.summary.rated}} из {{feedback.summary.sent}} опросов со звездами</small></div>
 </div>
-<p class="small muted">Процент удовлетворенности считается среди ответивших: «Хорошо» / все оценки × 100%. Отсутствие оценки не считается положительным ответом. Оценка «Плохо» сохраняется для разбора и сама по себе не переводит диалог сотруднику.</p>
+<h3>Распределение оценок</h3>
+<table aria-label="Количество оценок по числу звезд"><thead><tr>{% for n in range(1,6) %}<th scope="col">{{n}} ⭐</th>{% endfor %}</tr></thead><tbody><tr>{% for n in range(1,6) %}<td>{{feedback.summary['stars_' ~ n]}}</td>{% endfor %}</tr></tbody></table>
+<p class="small muted">Средний балл и доля оценок 4–5 считаются только по ответам со звездами. Отсутствие оценки не считается положительным ответом. Оценки 1–2 сохраняются для разбора и сами по себе не переводят диалог сотруднику.</p>
 <details><summary>Оценки по дням</summary>
-<div class="statistics-daily-scroll" role="region" aria-label="Оценки по дням" tabindex="0"><table><thead><tr><th>Дата опроса</th><th>Отправлено</th><th>Хорошо</th><th>Плохо</th><th>Доля «Хорошо»</th><th>Ответили</th></tr></thead><tbody>
-{% for row in feedback.days %}<tr><td>{{row.label}}</td><td>{{row.sent}}</td><td>{{row.good}}</td><td>{{row.bad}}</td><td>{{('%.1f'|format(row.percent)).replace('.', ',') ~ '%' if row.percent is not none else '—'}}</td><td>{{row.rated}}{% if row.response_percent is not none %} ({{('%.1f'|format(row.response_percent)).replace('.', ',')}}%){% endif %}</td></tr>{% endfor %}
+<div class="statistics-daily-scroll" role="region" aria-label="Оценки по дням" tabindex="0"><table><thead><tr><th>Дата опроса</th><th>Отправлено</th><th>Средняя из 5</th><th>Оценки 4–5</th><th>Ответили</th></tr></thead><tbody>
+{% for row in feedback.days %}<tr><td>{{row.label}}</td><td>{{row.sent}}</td><td>{{average(row.average)}}</td><td>{{percent(row.percent)}}</td><td>{{row.rated}}{% if row.response_percent is not none %} ({{percent(row.response_percent)}}){% endif %}</td></tr>{% endfor %}
 </tbody></table></div></details>
-{% if feedback.negative %}<hr><h3>Последние оценки «Плохо»</h3><p class="small muted">До 10 последних оценок для опросов выбранного периода. Показан готовый ответ, после которого был отправлен опрос; оценка может относиться ко всей консультации.</p>
-{% for row in feedback.negative %}<details><summary>{{row.user_name or 'Пользователь'}} · ID {{row.peer_id}} · {{row.rated_at|date}}</summary>
+{% if feedback.negative %}<hr><h3>Низкие оценки</h3><p class="small muted">До 10 последних оценок 1–2 за выбранный период. Показан готовый ответ перед опросом; оценка может относиться ко всей консультации.</p>
+{% for row in feedback.negative %}<details><summary><span class="badge">{{row.rating_stars}} из 5 ⭐</span> {{row.user_name or 'Пользователь'}} · ID {{row.peer_id}} · {{row.rated_at|date}}</summary>
 <p><a href="/dialogue/{{row.peer_id}}">Открыть диалог</a>{% if row.topic %} · {{row.topic|topic_label}}{% endif %}</p>
 <p class="small muted">Вопрос перед последним готовым ответом</p><blockquote>{{row.text|truncate(700) if row.text else 'Текст не сохранен'}}</blockquote>
 <p class="small muted">Отправленный ответ бота</p><blockquote>{{row.reply|truncate(2000) if row.reply else 'Текст не сохранен'}}</blockquote>

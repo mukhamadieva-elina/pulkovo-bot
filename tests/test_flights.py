@@ -317,7 +317,7 @@ class FlightEngineTests(FeedbackFixture):
 
     def test_handoff_before_delivery_cancels_flight(self):
         row=self.message('SU6401 сегодня',deliver=False)
-        self.db.take_dialogue(11,'Сотрудник',OperatorInbox(self.db).revision(11))
+        self.db.take_dialogue(11,OperatorInbox(self.db).revision(11))
         self.engine.deliver(self.transport)
         self.transport.send.assert_not_called()
         self.assertEqual(self.db.one('SELECT status FROM requests WHERE id=?',(row['id'],))['status'],'cancelled')
@@ -327,7 +327,7 @@ class FlightEngineTests(FeedbackFixture):
         self.db.record_consent(11,11,'revoked','revoke')
         self.message('SU6401 сегодня')
         board.get.assert_not_called()
-        self.db.take_dialogue(11,'Сотрудник',OperatorInbox(self.db).revision(11))
+        self.db.take_dialogue(11,OperatorInbox(self.db).revision(11))
         self.message('SU6401 сегодня')
         board.get.assert_not_called()
 

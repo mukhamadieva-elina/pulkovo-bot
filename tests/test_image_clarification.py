@@ -43,7 +43,7 @@ class ImageClarificationTests(unittest.TestCase):
     def test_photo_without_caption_asks_ai_question_instead_of_guessing_answer(self):
         row=self.process(attachments=self.photo)
         self.assertEqual(row['outcome'],'clarify')
-        self.assertEqual(row['reply'],self.question)
+        self.assertEqual(row['reply'],self.db.setting('session_intro')+'\n\n'+self.question)
         self.assertEqual(row['prompt_tokens'],15)
         self.assertEqual(row['completion_tokens'],6)
         self.ai.route.assert_not_called()
@@ -85,7 +85,7 @@ class ImageClarificationTests(unittest.TestCase):
         self.ai.route.return_value=dict(action='handoff',card_id=None,kind='other',tone='neutral',handoff_reason='no_answer',usage={'prompt_tokens':100,'completion_tokens':20})
         row=self.process('Вот',self.photo)
         self.assertEqual(row['outcome'],'clarify')
-        self.assertEqual(row['reply'],self.question)
+        self.assertEqual(row['reply'],self.db.setting('session_intro')+'\n\n'+self.question)
         self.assertEqual(row['prompt_tokens'],115)
         self.assertEqual(row['completion_tokens'],26)
         self.assertFalse(self.db.conversation(11)['human_mode'])

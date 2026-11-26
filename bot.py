@@ -132,6 +132,7 @@ def main():
         transport=VKTransport(config)
         while not stop.is_set():
             try:
+                feedback.sync_votes(transport.api,ingress,stop=stop)
                 expire_sessions(db)
                 if feedback.deliver(transport,ingress):
                     continue

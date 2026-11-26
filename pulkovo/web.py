@@ -23,7 +23,7 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from .ai import AIError, GigaChat
 from .db import Database
-from .dialogue_rules import GREETING_TEXT, THANKS_TEXT, is_greeting, is_thanks
+from .dialogue_rules import SESSION_INTRO, GREETING_PROMPT, THANKS_TEXT, FAREWELL_TEXT, is_greeting, is_thanks, is_farewell
 from .consent import consent_message, valid_consent_url
 from .importer import import_workbook, inspect_workbook, template_workbook
 from .search import searcher
@@ -43,6 +43,7 @@ LABELS.update({"delivery_failed":"Не удалось отправить отв�
 LABELS.update({'waiting_user':'Ждём пользователя','staff_joined':'Ответил сотрудник'})
 LABELS.update({'thanks':'Благодарность','acknowledge':'Ответ на благодарность','bot':'У бота'})
 LABELS['greeting']='Приветствие'
+LABELS['farewell']='Прощание'
 LABELS.update({'feedback':'Оценка помощи бота','feedback_duplicate':'Оценка уже сохранена','feedback_invalid':'Недействительная оценка'})
 LABELS.update({'inactivity':'Закрыто по неактивности','manual':'Завершено сотрудником'})
 LABELS.update({'normal':'Без ограничений полётов','cover':'При ограничениях полётов (КОВЁР)'})
@@ -151,7 +152,7 @@ def create_app(config, database=None):
                 abort(429,"Слишком много попыток. Повторите через 5 минут.")
             if hmac.compare_digest(request.state.form.get("password","").encode(),config.admin_password.encode()):
                 request.session.clear()
-                request.session.update(authenticated=True,csrf=secrets.token_urlsafe(32),staff_name="Сотрудник")
+                request.session.update(authenticated=True,csrf=secrets.token_urlsafe(32))
                 db.execute("DELETE FROM login_attempts WHERE address=?",(address,))
                 return redirect(url_for("dashboard"))
             count = row["attempts"]+1 if row and time.time()-row["since"]<300 else 1
@@ -375,10 +376,8 @@ def create_app(config, database=None):
             try:
                 if action=='reply':
                     draft=request.state.form.get('reply','')
-                    name=request.state.form.get('staff_name','').strip()[:80] or 'Сотрудник'
-                    request.session['staff_name']=name
                     form_key=request.state.form.get('client_key','')
-                    inbox.queue(peer_id,draft,name,form_key,request.state.form.get('revision',''))
+                    inbox.queue(peer_id,draft,'Сотрудник',form_key,request.state.form.get('revision',''))
                     flash(request, 'Ответ поставлен в очередь отправки. Подтверждение появится в переписке.')
                 elif action in ('retry','cancel'):
                     inbox.control(peer_id,int(request.state.form.get('outbox_id','0')),action)
@@ -387,10 +386,8 @@ def create_app(config, database=None):
                     db.resume(peer_id,request.state.form.get('revision',''))
                     flash(request, "Управление возвращено боту. Он ответит на следующее новое сообщение.")
                 elif action=="take":
-                    name=request.state.form.get("staff_name","").strip()[:80] or "Сотрудник"
-                    request.session["staff_name"]=name
-                    db.take_dialogue(peer_id,name,request.state.form.get('revision',''))
-                    flash(request, "Диалог закреплен за вами. Автоматические ответы приостановлены.")
+                    db.take_dialogue(peer_id,request.state.form.get('revision',''))
+                    flash(request, "Включен режим сотрудника. Автоматические ответы приостановлены.")
                 elif action in ('pause_bot','unpause_bot'):
                     db.pause_bot(peer_id,action=='pause_bot',request.state.form.get('revision',''))
                     flash(request,'Автоответы отключены на 24 часа. Вы можете отвечать вручную.' if action=='pause_bot' else 'Ограничение автоответов снято. Текущий режим диалога сохранен.')
@@ -463,9 +460,11 @@ def create_app(config, database=None):
         report=feedback_report(db,period['since'],period['until'])
         output=io.StringIO()
         writer=csv.writer(output)
-        writer.writerow(['Дата опроса (Москва)','Отправлено опросов','Хорошо','Плохо','Всего оценок','Доля Хорошо, %','Доля ответивших, %'])
+        writer.writerow(['Дата опроса (Москва)','Отправлено опросов со звездами','1 звезда','2 звезды','3 звезды','4 звезды','5 звезд',
+            'Всего оценок со звездами','Средняя оценка из 5','Доля оценок 4 и 5, %','Доля ответивших на опрос со звездами, %'])
         for row in report['days']:
-            writer.writerow([row['day'],row['sent'],row['good'],row['bad'],row['rated'],
+            writer.writerow([row['day'],row['sent'],*[row[f'stars_{n}'] for n in range(1,6)],row['rated'],
+                f"{row['average']:.2f}" if row['average'] is not None else '',
                 f"{row['percent']:.1f}" if row['percent'] is not None else '',
                 f"{row['response_percent']:.1f}" if row['response_percent'] is not None else ''])
         return Response('\ufeff'+output.getvalue(),media_type='text/csv',headers={'Content-Disposition':'attachment; filename=feedback-by-day.csv'})
@@ -511,7 +510,7 @@ def create_app(config, database=None):
     def settings_page(request: Request):
         if request.method=="POST":
             old=db.settings()
-            values={key:request.state.form.get(key,old[key]).strip() for key in ("max_clarifications","consent_url","consent_text","handoff_text","retention_days","waiting_user_timeout_hours")}
+            values={key:request.state.form.get(key,old[key]).strip() for key in ("max_clarifications","consent_url","consent_text","session_intro","handoff_text","retention_days","waiting_user_timeout_hours")}
             values.update({key:old[key] for key in ('search_strategy','search_limit','consent_version')})
             values.update(cover_mode=str(request.state.form.get("cover_mode")=="on").lower(),consent_ready=str(request.state.form.get("consent_ready")=="on").lower(),feedback_enabled=str(request.state.form.get('feedback_enabled')=='on').lower())
             try:
@@ -519,11 +518,13 @@ def create_app(config, database=None):
                     raise ValueError("Проверьте число уточнений и срок хранения.")
                 if not 0<=int(values['waiting_user_timeout_hours'])<=720:
                     raise ValueError('Срок ожидания должен быть от 1 до 720 часов, либо 0 для отключения.')
-                if not values["consent_version"] or not values["consent_text"] or not values["handoff_text"]:
+                if not values["consent_version"] or not values["consent_text"] or not values["handoff_text"] or not values['session_intro']:
                     raise ValueError("Заполните тексты и версию согласия.")
+                if len(values['session_intro'])>300:
+                    raise ValueError('Сообщение в начале сессии должно быть не длиннее 300 символов.')
                 if not valid_consent_url(values["consent_url"]):
                     raise ValueError("Ссылка необязательна. Если заполняете её, укажите HTTPS-адрес документа.")
-                if len(consent_message(values)) > 3500:
+                if len(consent_message(values,include_intro=True)) > 3500:
                     raise ValueError("Текст согласия вместе со ссылкой должен быть не длиннее 3500 символов.")
                 if any(values[k]!=old[k] for k in ("consent_text","consent_url")):
                     values['consent_version']='consent-'+str(time.time_ns())
@@ -533,7 +534,23 @@ def create_app(config, database=None):
             except ValueError as exc:
                 flash(request, str(exc),"error")
             return redirect(url_for("settings_page"))
-        return render(request, "settings.html",title="Настройки",external=config.external_user_data)
+        return render(request, "settings.html",title="Настройки",external=config.external_user_data,consent_preview=consent_message(db.settings()))
+
+    @router.post('/settings/consent-preview')
+    def settings_consent_preview(request: Request):
+        values=db.settings()
+        for key in ('session_intro','consent_text','consent_url'):
+            value=request.state.form.get(key,values[key])
+            if len(value)>10000:
+                abort(400,'Текст слишком длинный для предпросмотра.')
+            values[key]=value
+        text=consent_message(values)
+        warning=''
+        if len(consent_message(values,include_intro=True))>3500:
+            warning='Сообщение длиннее 3500 символов. Сократите текст перед сохранением.'
+        elif not valid_consent_url(values['consent_url'].strip()):
+            warning='Для ссылки на условия нужен HTTPS-адрес.'
+        return dict(text=text,session_intro=values['session_intro'].strip(),warning=warning)
 
     @router.api_route("/preview",methods=["GET","POST"])
     def preview(request: Request):
@@ -548,11 +565,14 @@ def create_app(config, database=None):
                 if request.state.form.get("action")=="ai":
                     if request.state.form.get("synthetic")!="on":
                         raise ValueError("Для теста используйте вымышленные данные и подтвердите это.")
+                    if is_farewell(text):
+                        decision=dict(action='farewell',reply=FAREWELL_TEXT,reason='Готовое прощание без вызова ИИ.')
+                        return render(request, "preview.html",title="Проверка ответа",text=text,decision=decision,selected=selected,answer_card=answer_card)
                     if is_thanks(text):
                         decision=dict(action='acknowledge',kind='thanks',reply=THANKS_TEXT,reason='Готовый ответ без вызова ИИ.')
                         return render(request, "preview.html",title="Проверка ответа",text=text,decision=decision,answer_card=None)
                     if is_greeting(text):
-                        decision=dict(action='greeting',reply=GREETING_TEXT,reason='Готовое приветствие без вызова ИИ.')
+                        decision=dict(action='greeting',reply=(db.setting('session_intro') or SESSION_INTRO)+'\n\n'+GREETING_PROMPT,reason='Начало новой сессии с приветствием, без вызова ИИ.')
                         return render(request, "preview.html",title="Проверка ответа",text=text,decision=decision,answer_card=None)
                     query = parse_query(text)
                     if query is not None:

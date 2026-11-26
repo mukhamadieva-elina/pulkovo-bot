@@ -11,20 +11,18 @@
 <form method="post" id="reply-form" class="reply-form">
 {{hidden('reply')}}<input type="hidden" name="client_key" value="{{form_key}}">
 <label>Ответ пассажиру<textarea name="reply" rows="3" required maxlength="3500" placeholder="Напишите ответ от имени сообщества…">{{draft}}</textarea></label>
-<div class="reply-footer"><details class="staff-identity"><summary>Сотрудник: {{session.staff_name or 'Сотрудник'}}</summary><label>Ваше имя<input name="staff_name" value="{{session.staff_name or 'Сотрудник'}}" required maxlength="80"></label><span class="small muted">Видно только коллегам.</span></details><button class="primary">Отправить ответ</button></div>
+<div class="reply-footer"><button class="primary">Отправить ответ</button></div>
 <p class="small muted">После отправки отвечает сотрудник. Бот не вмешивается, пока вы не вернете ему диалог.</p>
 </form></section>
 <aside class="dialogue-controls" aria-label="Управление диалогом">
 <section class="control-section"><h3>Кто отвечает сейчас</h3>
 <span class="badge {{'warning' if conversation.human_mode else 'success'}}" data-active-status>{{'Отвечает сотрудник' if conversation.human_mode else 'Автоответы отключены' if bot_paused else 'Отвечает бот'}}</span>
 {% if t %}<p class="small status-explanation">{{'Пассажир ждет ответа сотрудника.' if t.status=='open' else 'Сотрудник ответил. Ждем новое сообщение пассажира.'}}</p>
-<p class="small muted">Ответственный: <strong>{{t.assigned_to or 'Не назначен'}}</strong></p>
-{% if not t.assigned_to %}<form method="post">{{hidden('take')}}<input type="hidden" name="staff_name" value="{{session.staff_name or 'Сотрудник'}}"><button data-mode-action>Взять диалог себе</button><p class="small muted">Коллеги увидят, что вы занимаетесь этим вопросом.</p></form>{% endif %}
 <div class="control-action"><h4>Закончили помощь?</h4><p class="small muted">Завершите работу сотрудника. Бот ответит на следующее новое сообщение. Сейчас пассажиру ничего не отправится.</p>
 <form method="post">{{hidden('resume')}}<button class="full" data-mode-action {{'disabled' if bot_paused else ''}}>Завершить и включить бота</button></form>
 {% if bot_paused %}<p class="small attention">Сначала снимите ограничение в разделе «Спам и ограничения».</p>{% endif %}</div>
 {% else %}<p class="small status-explanation">{{'Сообщения видны сотрудникам, автоматических ответов пока нет.' if bot_paused else 'Бот отвечает на вопросы по базе знаний. Если потребуется помощь, диалог появится в очереди.'}}</p>
-<form method="post">{{hidden('take')}}<input type="hidden" name="staff_name" value="{{session.staff_name or 'Сотрудник'}}"><button class="full" data-mode-action>Ответить вместо бота</button><p class="small muted">Приостановить бота и взять диалог себе. Сообщение пассажиру не отправляется.</p></form>{% endif %}
+<form method="post">{{hidden('take')}}<button class="full" data-mode-action>Ответить вместо бота</button><p class="small muted">Включить режим сотрудника и приостановить автоответы. Сообщение пассажиру не отправляется.</p></form>{% endif %}
 </section>
 {% if t %}<details class="control-section"><summary>Тема и заметка сотрудника</summary><p class="small muted">{{t.reason|label}} · {{t.created_at|date}}</p>
 <form method="post">{{hidden('topic')}}<input type="hidden" name="ticket_id" value="{{t.id}}"><input type="hidden" name="topic_version" value="{{t.topic_version}}"><label>Тема<input name="topic" value="{{t.topic|topic_label}}" list="ticket-topics" required maxlength="250" placeholder="Выберите или введите тему"></label><button>Сохранить тему</button></form>

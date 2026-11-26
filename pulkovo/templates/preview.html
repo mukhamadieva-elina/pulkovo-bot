@@ -9,7 +9,7 @@
 {% elif decision.source=='flight_board' %}<blockquote>{{decision.reply}}</blockquote>
 {% elif decision.action=='clarify' %}<blockquote>{{decision.question}}</blockquote>
 {% elif decision.action=='acknowledge' %}<blockquote>{{decision.reply or "Пожалуйста! 🙂"}}</blockquote>
-{% elif decision.action=='greeting' %}<blockquote>{{decision.reply}}</blockquote>
+{% elif decision.action in ('greeting','farewell') %}<blockquote>{{decision.reply}}</blockquote>
 {% else %}<p>Обращение появится в очереди сотрудника. Бот приостановит автоматические ответы в этом диалоге.</p>{% endif %}
 {% if decision.topic %}<p class="muted">Тема: {{decision.topic|topic_label}}</p>{% endif %}
 {% if decision.reason %}<p class="small muted">{{decision.reason}}</p>{% endif %}</section>{% endif %}

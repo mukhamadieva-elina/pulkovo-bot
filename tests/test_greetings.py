@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 from pulkovo.ai import validate_decision
 from pulkovo.config import Config
 from pulkovo.db import Database
-from pulkovo.dialogue_rules import GREETING_TEXT, GREETING_IDLE_SECONDS, is_greeting, is_thanks, without_opening_greeting
+from pulkovo.dialogue_rules import GREETING_TEXT, GREETING_PROMPT, SESSION_INTRO, GREETING_IDLE_SECONDS, is_greeting, is_thanks, without_opening_greeting
 from pulkovo.engine import Engine
 from pulkovo.operator import OperatorInbox
 from pulkovo.statistics import automation_summary
@@ -66,7 +66,8 @@ class GreetingTests(unittest.TestCase):
         self.db.record_consent(11, 11, 'revoked', 'revoke')
         row = self.process()
         self.assertEqual(row['outcome'], 'consent_required')
-        self.assertIn('GigaChat', row['reply'])
+        self.assertIn('персональные данные', row['reply'])
+        self.assertNotIn('GigaChat', row['reply'])
         self.assertEqual(row['text'], '')
         self.assertEqual(self.ai.mock_calls, [])
 
@@ -81,7 +82,7 @@ class GreetingTests(unittest.TestCase):
         self.ai.route.return_value = dict(action='answer', card_id=card, kind='question')
         row = self.process('Привет, где парковка?', payload={'local_intent': 'greeting'})
         self.assertEqual(row['outcome'], 'answer')
-        self.assertEqual(row['reply'], 'Проверенный ответ.')
+        self.assertEqual(row['reply'], SESSION_INTRO+'\n\nПроверенный ответ.')
         self.assertEqual(self.ai.route.call_args.args[0], 'Привет, где парковка?')
 
     def test_photo_with_greeting_is_not_discarded(self):
@@ -113,7 +114,7 @@ class GreetingTests(unittest.TestCase):
 
     def test_taking_dialogue_in_admin_cancels_prepared_greeting(self):
         row = self.process()
-        self.db.take_dialogue(11, 'Сотрудник', OperatorInbox(self.db).revision(11))
+        self.db.take_dialogue(11, OperatorInbox(self.db).revision(11))
         self.assertEqual(self.db.one('SELECT status FROM requests WHERE id=?', (row['id'],))['status'], 'cancelled')
 
     def test_conversation_change_cancels_greeting_without_opening_ticket(self):
@@ -133,6 +134,20 @@ class GreetingTests(unittest.TestCase):
         ai.assert_not_called()
         self.assertIn(f'<blockquote>{GREETING_TEXT}</blockquote>', page)
         self.assertNotIn('<blockquote>Пожалуйста!</blockquote>', page)
+
+    def test_greeting_can_be_edited_without_changing_consent(self):
+        client=authenticated_client(self.cfg,self.db)
+        self.addCleanup(client.close)
+        text='Здравствуйте! Напишите вопрос о багаже или рейсе.'
+        client.post('/settings',data={'csrf':'test','consent_ready':'on','session_intro':text})
+        self.assertEqual(self.db.setting('consent_version'),'v1')
+        restarted=Database(self.db.path)
+        self.engine=Engine(restarted,self.ai,self.cfg)
+        self.assertEqual(self.process()['reply'],text+'\n\n'+GREETING_PROMPT)
+        with patch('pulkovo.web.GigaChat') as ai:
+            page=client.post('/preview',data={'csrf':'test','action':'ai','text':'Привет','synthetic':'on'}).text
+        ai.assert_not_called()
+        self.assertIn(f'<blockquote>{text}\n\n{GREETING_PROMPT}</blockquote>',page)
 
     def test_ai_cannot_label_a_question_or_handoff_as_gratitude(self):
         for action in ('clarify', 'handoff', 'answer'):
@@ -169,7 +184,7 @@ class GreetingTests(unittest.TestCase):
 
     def test_repeat_greeting_and_model_clarification_continue_without_hello(self):
         self.process(); self.engine.deliver(self.transport)
-        self.assertEqual(self.process()['reply'], without_opening_greeting(GREETING_TEXT))
+        self.assertEqual(self.process()['reply'], GREETING_PROMPT)
         self.engine.deliver(self.transport)
         self.answer_card()
         self.ai.route.return_value = dict(action='clarify', card_id=None, kind='question',
@@ -187,13 +202,13 @@ class GreetingTests(unittest.TestCase):
     def test_recent_consent_message_counts_as_start_of_conversation(self):
         self.process('Согласен', payload={'action': 'agree', 'version': 'v1'})
         self.engine.deliver(self.transport)
-        self.assertEqual(self.process()['reply'], without_opening_greeting(GREETING_TEXT))
+        self.assertEqual(self.process()['reply'], GREETING_PROMPT)
 
-    def test_staff_response_counts_after_return_to_bot(self):
+    def test_staff_completion_starts_new_session_with_intro(self):
         row = self.process('Нужен сотрудник', payload={'action': 'operator'})
         self.db.staff_replied(11, 'staff-start', 99, 10, int(row['created_at']), text='Здравствуйте! Уточните вопрос.')
         self.db.resume(11)
-        self.assertEqual(self.process()['reply'], without_opening_greeting(GREETING_TEXT))
+        self.assertEqual(self.process()['reply'], GREETING_TEXT)
 
     def test_greeting_is_allowed_after_a_day_without_replies(self):
         row = self.process(); self.engine.deliver(self.transport)

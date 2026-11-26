@@ -9,14 +9,16 @@ from .migrations import migrate
 from .resources import bind_answer
 from .feedback import cancel_pending, record_activity, message_random_id
 from .protection import admit, LIMIT_TEXT
-from .dialogue_rules import GREETING_IDLE_SECONDS
+from .dialogue_rules import GREETING_IDLE_SECONDS, SESSION_INTRO
+from .consent import DEFAULT_CONSENT_TEXT
 from .sessions import close_session, ensure_session, expire_idle
 
 
 DEFAULT_SETTINGS = {
+    "session_intro": SESSION_INTRO,
     "search_strategy": "full", "search_limit": "8", "cover_mode": "false",
     "max_clarifications": "2", "consent_version": "draft-1", "consent_ready": "false",
-    "consent_url": "", "consent_text": "Здравствуйте! Я виртуальный помощник аэропорта. Для обработки ваших вопросов и изображений используется сторонний ИИ-сервис GigaChat. Ознакомьтесь с отдельным согласием на обработку данных и выберите способ общения.",
+    "consent_url": "", "consent_text": DEFAULT_CONSENT_TEXT,
     "handoff_text": "Обращение передано сотруднику. Автоматические ответы в этом диалоге приостановлены.",
     "retention_days": "30", "waiting_user_timeout_hours": "24", "feedback_enabled": "true",
 }
@@ -123,7 +125,6 @@ class Database:
             CASE WHEN c.human_mode=0 THEN 'bot' WHEN t.status='waiting_user' THEN 'waiting_user' ELSE 'open' END status,
             CASE WHEN c.human_mode=1 THEN coalesce(t.topic,'') WHEN q.id>t.request_id THEN q.topic ELSE coalesce(nullif(t.topic,''),q.topic,'') END topic,
             CASE WHEN c.human_mode=1 THEN coalesce(t.reason,'') ELSE '' END reason,
-            CASE WHEN c.human_mode=1 THEN coalesce(t.assigned_to,'') ELSE '' END assigned_to,
             CASE WHEN c.human_mode=1 THEN coalesce(t.auto_close_paused,0) ELSE 0 END auto_close_paused,
             t.last_staff_reply_at,r.created_at,r.text last_text,
             max(r.updated_at,coalesce((SELECT max(created_at) FROM staff_replies s WHERE s.peer_id=c.peer_id),0)) last_activity,
@@ -288,7 +289,7 @@ class Database:
             self._refresh_ticket_topics(con,peer_id)
             con.execute('UPDATE conversations SET human_mode=1,generation=generation+1,updated_at=? WHERE peer_id=?', (time.time(),peer_id))
             cancel_pending(con,peer_id,'staff_joined')
-            con.execute("UPDATE requests SET status='cancelled',reason='staff_joined',reply=NULL WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','flight_info')", (peer_id,))
+            con.execute("UPDATE requests SET status='cancelled',reason='staff_joined',reply=NULL WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','farewell','flight_info')", (peer_id,))
             return True
 
     def handoff(self, request, reason):
@@ -306,7 +307,7 @@ class Database:
             if OperatorInbox(self).revision(peer_id,con)!=expected_revision:
                 raise ValueError('Диалог изменился. Проверьте новые сообщения и повторите действие.')
 
-    def take_dialogue(self, peer_id, name, expected_revision):
+    def take_dialogue(self, peer_id, expected_revision):
         with self.connect() as con:
             con.execute('BEGIN IMMEDIATE')
             self._check_dialogue_revision(con,peer_id,expected_revision)
@@ -316,9 +317,8 @@ class Database:
             now=time.time()
             ensure_session(con,peer_id,now)
             con.execute("INSERT OR IGNORE INTO tickets(peer_id,request_id,reason,status,created_at) VALUES (?,?,'staff_joined','open',?)",(peer_id,latest['id'],now))
-            con.execute("UPDATE tickets SET assigned_to=?,taken_at=? WHERE peer_id=? AND status IN ('open','waiting_user')",(name,now,peer_id))
             con.execute('UPDATE conversations SET human_mode=1,generation=generation+1,updated_at=? WHERE peer_id=?',(now,peer_id))
-            con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='staff_joined' WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','flight_info')",(peer_id,))
+            con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='staff_joined' WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','farewell','flight_info')",(peer_id,))
             cancel_pending(con,peer_id,'staff_joined')
             self._refresh_ticket_topics(con,peer_id)
             con.execute("INSERT INTO audit(action,target,created_at) VALUES ('take_dialogue',?,?)",(str(peer_id),now))
@@ -348,7 +348,7 @@ class Database:
             con.execute("""UPDATE requests SET status='done',outcome='human_mode',reason='closed_by_staff',reply=NULL,updated_at=?
                 WHERE peer_id=? AND status IN ('pending','processing')
                 AND coalesce(json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,'$.action'),'') NOT IN ('agree','revoke','feedback')""",(time.time(),peer_id))
-            con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='closed_by_staff' WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','flight_info','rate_limited','input_rejected')",(peer_id,))
+            con.execute("UPDATE requests SET status='cancelled',reply=NULL,reason='closed_by_staff' WHERE peer_id=? AND status='ready' AND outcome IN ('answer','clarify','handoff','thanks','greeting','farewell','flight_info','rate_limited','input_rejected')",(peer_id,))
             cancel_pending(con,peer_id,'returned_to_bot')
             con.execute("UPDATE tickets SET status='closed',closed_at=?,closure_reason='manual' WHERE peer_id=? AND status IN ('open','waiting_user')", (time.time(), peer_id))
             close_session(con,peer_id,'manual',time.time())
@@ -406,10 +406,28 @@ class Database:
             UNION ALL SELECT 1 FROM staff_replies WHERE peer_id=? AND created_at>=?
             LIMIT 1""", (peer_id, request_id, cutoff, peer_id, cutoff)))
 
+    def has_session_reply(self, request):
+        return bool(self.one("""SELECT 1 FROM requests WHERE peer_id=? AND session_id=?
+            AND id<? AND status='sent' AND reply IS NOT NULL LIMIT 1""",
+            (request['peer_id'],request.get('session_id'),request['id'])))
+
+    def needs_session_intro(self, request):
+        if request.get('session_id') is None or self.has_session_reply(request):
+            return False
+        # VK greets new users. Earlier sessions or an earlier consent identify
+        # returning users, including conversations created before session tracking.
+        return bool(self.one("""SELECT 1 FROM dialogue_sessions WHERE peer_id=? AND id<?
+            UNION ALL SELECT 1 FROM consent_events WHERE peer_id=? AND action='accepted'
+                AND vk_event_key<>? LIMIT 1""",
+            (request['peer_id'],request['session_id'],request['peer_id'],request['event_key'])))
+
     def history(self, peer_id, limit=4):
         generation = self.conversation(peer_id)["generation"]
-        rows=list(reversed(self.all("SELECT text,reply,image_descriptions FROM requests WHERE peer_id=? AND status='sent' AND ai_generation=? AND session_id=(SELECT id FROM dialogue_sessions WHERE peer_id=requests.peer_id AND closed_at IS NULL) AND outcome IN ('answer','clarify') AND flight_query IS NULL AND updated_at>=? AND id>coalesce((SELECT max(id) FROM requests WHERE peer_id=? AND outcome='thanks' AND status='sent'),0) ORDER BY id DESC LIMIT ?", (peer_id, generation,time.time()-1800, peer_id, limit))))
+        rows=list(reversed(self.all("SELECT text,reply,intro_text,image_descriptions FROM requests WHERE peer_id=? AND status='sent' AND ai_generation=? AND session_id=(SELECT id FROM dialogue_sessions WHERE peer_id=requests.peer_id AND closed_at IS NULL) AND outcome IN ('answer','clarify') AND flight_query IS NULL AND updated_at>=? AND id>coalesce((SELECT max(id) FROM requests WHERE peer_id=? AND outcome IN ('thanks','farewell') AND status='sent'),0) ORDER BY id DESC LIMIT ?", (peer_id, generation,time.time()-1800, peer_id, limit))))
         for row in rows:
+            intro=row.pop('intro_text')
+            if intro and row['reply'] and row['reply'].startswith(intro+'\n\n'):
+                row['reply']=row['reply'][len(intro)+2:]
             images=json.loads(row.pop('image_descriptions'))
             if images:
                 row['image_descriptions']=images

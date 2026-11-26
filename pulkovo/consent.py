@@ -3,21 +3,20 @@
 from urllib.parse import urlparse
 import re
 import unicodedata
-from .dialogue_rules import without_opening_greeting
+from .dialogue_rules import without_opening_greeting, SESSION_INTRO
 
 
-INTRODUCTION = (
-    '✈ Я бот Пулково.\n\n'
-    'Помогу с вопросами о багаже, регистрации, парковке и услугах аэропорта. '
-    'Можно написать вопрос или прислать фотографию: если информации будет мало, я уточню детали. '
-    'Если потребуется помощь сотрудника, передам ему обращение.\n\n'
-    'Также проверю рейс по онлайн-табло Пулково. Напишите номер с кодом авиакомпании '
-    'и дату по расписанию в Пулково, например: SU 25 сегодня.'
+INTRODUCTION = SESSION_INTRO
+DEFAULT_CONSENT_TEXT = (
+    'Для ответа на ваше обращение будут обрабатываться ваши сообщения и фотографии, '
+    'включая содержащиеся в них персональные данные. '
+    'Переписка сохраняется и доступна сотрудникам поддержки.\n\n'
+    'Не присылайте паспортные и банковские данные или коды бронирования. '
+    'Отозвать согласие: /отозвать.'
 )
 CONSENT_INSTRUCTION = (
-    'Нажмите «Согласен» или отправьте отдельным сообщением «Согласен» либо «Согласна». '
-    'Такое сообщение также означает согласие с условиями выше.\n\n'
-    'Для общения без ИИ выберите «Без ИИ — к сотруднику».'
+    'Если согласны с обработкой, нажмите «Согласен» или напишите «Согласен» / «Согласна».\n'
+    'Можно также обратиться к сотруднику.'
 )
 
 
@@ -38,10 +37,11 @@ def valid_consent_url(value):
         return False
 
 
-def consent_message(settings):
+def consent_message(settings, *, include_intro=False):
+    intro = settings.get('session_intro', INTRODUCTION).strip() if include_intro else ''
     text = without_opening_greeting(settings.get("consent_text", "").strip())
     url = settings.get("consent_url", "").strip()
-    return (INTRODUCTION + '\n\nУсловия обработки данных\n\n' + text
+    return ((intro + '\n\n' if intro else '') + text
             + ("\n\nПодробнее об условиях: " + url if url else "")
             + '\n\n' + CONSENT_INSTRUCTION)
 
@@ -52,5 +52,5 @@ def consent_configured(settings):
         and bool(settings.get("consent_version", "").strip())
         and bool(settings.get("consent_text", "").strip())
         and valid_consent_url(settings.get("consent_url", "").strip())
-        and len(consent_message(settings)) <= 3500
+        and len(consent_message(settings, include_intro=True)) <= 3500
     )

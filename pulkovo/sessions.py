@@ -58,7 +58,7 @@ def close_after_rating(con, survey, now):
     # A late vote for an earlier answer must not close newer work, even in the same session.
     newer = con.execute("""SELECT 1 FROM requests WHERE peer_id=? AND id>?
         AND coalesce(json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,'$.action'),'')!='feedback'
-        AND NOT (coalesce(outcome,'')='thanks' AND status='sent') LIMIT 1""",
+        AND NOT (coalesce(outcome,'') IN ('thanks','farewell') AND status='sent') LIMIT 1""",
         (survey['peer_id'], survey['activity_request_id'])).fetchone()
     if newer or con.execute("SELECT 1 FROM operator_outbox WHERE peer_id=? AND status IN ('pending','sending','failed')", (survey['peer_id'],)).fetchone():
         return

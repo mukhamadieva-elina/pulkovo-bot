@@ -1,8 +1,11 @@
 {% extends 'base.html' %}{% block content %}
-<form method="post"><input type="hidden" name="csrf" value="{{csrf}}">
+<form method="post" data-settings-form data-consent-preview-url="/settings/consent-preview"><input type="hidden" name="csrf" value="{{csrf}}">
 <div class="two-col">
 <section class="panel"><h2>Общение с пассажирами</h2>
 <p class="muted">Бот выбирает ответы из опубликованной базы знаний. Если ответа нет или нужна помощь человека, обращение появляется в очереди сотрудника.</p>
+<label>Сообщение в начале сессии<textarea name="session_intro" rows="3" required maxlength="300">{{settings.session_intro}}</textarea></label>
+<p class="small muted">Новому пользователю приветствие показывает VK, поэтому бот начинает с запроса согласия без повторного приветствия. Этот текст добавляется один раз к первому ответу в следующих сессиях. Новая сессия начинается после оценки, завершения сотрудником или 24 часов тишины.</p>
+<details><summary>Приветствие в следующих сессиях</summary><p class="message-preview" data-session-intro-preview>{{settings.session_intro}}</p><p class="small muted">Следом в том же сообщении идет ответ на вопрос или запрос согласия, если условия изменились.</p></details>
 <label>Сообщение при передаче сотруднику<textarea name="handoff_text" rows="4" required>{{settings.handoff_text}}</textarea></label>
 <label>Срок ожидания ответа пользователя, часов<input type="number" name="waiting_user_timeout_hours" value="{{settings.waiting_user_timeout_hours}}" min="0" max="720" required></label>
 <p class="small muted">Только для статуса «Ждём пользователя», от последнего ответа сотрудника. 0 отключает таймер. Закрытие не отправляет сообщение пассажиру; бот подключится при новом вопросе. Новый срок действует и для уже ожидающих обращений.</p>
@@ -18,9 +21,11 @@
 <section class="panel"><h2>Согласие на обработку</h2>
 <p class="muted">Пользователь видит этот текст перед первым обращением к ИИ. После изменения текста или ссылки бот автоматически запросит согласие заново.</p>
 <label>Текст условий обработки данных<textarea name="consent_text" rows="12" required>{{settings.consent_text}}</textarea></label>
-<p class="small muted">Перед условиями бот добавляет описание своих возможностей, после них: инструкцию о кнопке и текстовом согласии. «Согласен» и «Согласна» отдельным сообщением принимаются только после отправки актуальных условий. Версия условий и показанное сообщение сохраняются.</p>
+<p class="small muted">После условий бот добавляет инструкцию о согласии. «Согласен» и «Согласна» отдельным сообщением принимаются только после отправки актуальных условий. Версия условий и показанное сообщение сохраняются.</p>
 <label>Ссылка на подробные условия — необязательно<input type="url" name="consent_url" value="{{settings.consent_url}}" placeholder="https://…"></label>
 <label class="checkbox"><input type="checkbox" name="consent_ready" {{'checked' if settings.consent_ready=='true' else ''}}> Текст готов к показу пользователям</label>
 <p class="small muted">Обработка через GigaChat {{'включена' if external else 'выключена'}}. Постоянных кнопок в чате нет; команды /оператор и /отозвать доступны всегда.</p>
+<details open><summary>Первый ответ новому пользователю</summary><p class="small muted">Приветствие уже показывает VK. Бот запрашивает согласие без повторного приветствия. Пример обновляется при редактировании; для применения сохраните настройки.</p><p class="small muted" data-consent-preview-status role="status" hidden></p><p class="message-preview" data-consent-preview>{{consent_preview}}</p></details>
 </section></div><button class="primary">Сохранить настройки</button></form>
+<script src="{{url_for('static',path='settings.js')}}" defer></script>
 {% endblock %}

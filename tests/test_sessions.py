@@ -25,7 +25,7 @@ class SessionTests(FeedbackFixture):
 
     def test_bad_rating_also_closes_without_claiming_success_or_handoff(self):
         self.send_survey()
-        self.message('Плохо',payload=self.payload(rating='bad'))
+        self.message('1 ⭐',payload=self.payload(rating=1))
         self.assertEqual(self.latest()['closure_reason'],'rating')
         self.assertFalse(self.db.conversation(11)['human_mode'])
         self.assertEqual(self.db.all('SELECT * FROM tickets'),[])
@@ -116,7 +116,7 @@ class SessionTests(FeedbackFixture):
 
     def test_boundaries_and_statistics_are_visible_in_admin(self):
         self.send_survey()
-        self.message('Хорошо',payload=self.payload())
+        self.message('5 ⭐',payload=self.payload())
         self.now+=1
         self.message('Новый вопрос')
         inbox=OperatorInbox(self.db)

@@ -48,6 +48,8 @@ class OperatorTests(unittest.TestCase):
 
     def test_web_reply_queues_once_and_shows_confirmed_history(self):
         form=self.form();form['reply']='Здравствуйте, ответ <script>без выполнения</script>'
+        self.assertNotIn('staff_name',form)
+        form['staff_name']='Имя из старой формы'
         self.assertEqual(self.client.post('/dialogue/11',data=form).status_code,303)
         self.assertEqual(self.client.post('/dialogue/11',data=form).status_code,303)
         self.assertEqual(len(self.db.all('SELECT * FROM operator_outbox')),1)
@@ -59,7 +61,9 @@ class OperatorTests(unittest.TestCase):
         page=self.client.get('/dialogue/11').text
         self.assertIn('Здравствуйте, ответ &lt;script&gt;',page)
         self.assertNotIn('<script>без выполнения',page)
-        self.assertIn('Анна',page)
+        self.assertIn('Сотрудник',page)
+        self.assertNotIn('Имя из старой формы',page)
+        self.assertEqual(self.db.one('SELECT staff_name FROM staff_replies')['staff_name'],'Сотрудник')
         self.api.messages.send.assert_called_once()
         self.assertNotIn('Анна',self.api.messages.send.call_args.kwargs['message'])
 
@@ -209,7 +213,7 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(self.db.one('SELECT outcome FROM requests WHERE id=?',(ident,))['outcome'],'consent_required')
 
     def test_control_actions_survive_text_removal_and_bad_payloads_stay_unknown(self):
-        for index,(action,expected) in enumerate([('decline','Выбрано «Без ИИ — к сотруднику»'),('operator','Запрос помощи сотрудника'),('revoke','Запрос на отзыв согласия')],30):
+        for index,(action,expected) in enumerate([('decline','Выбрано общение с сотрудником'),('operator','Запрос помощи сотрудника'),('revoke','Запрос на отзыв согласия')],30):
             self.engine.receive(index,index,f'control-{index}','',payload={'action':action})
             self.assertEqual(self.inbox.timeline(index)[0]['text'],expected)
         for index,payload in enumerate(['not json','[]','{"action": []}','{"action": "unrecognized"}','{}'],40):
